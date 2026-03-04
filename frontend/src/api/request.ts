@@ -35,4 +35,14 @@ instance.interceptors.response.use(
   }
 )
 
-export default instance
+// 导出带类型的请求方法
+export default {
+  get: <T = any>(url: string, config?: AxiosRequestConfig) => 
+    instance.get<T, T>(url, config),
+  post: <T = any>(url: string, data?: any, config?: AxiosRequestConfig) => 
+    instance.post<T, T>(url, data, config),
+  put: <T = any>(url: string, data?: any, config?: AxiosRequestConfig) => 
+    instance.put<T, T>(url, data, config),
+  delete: <T = any>(url: string, config?: AxiosRequestConfig) => 
+    instance.delete<T, T>(url, config)
+}
