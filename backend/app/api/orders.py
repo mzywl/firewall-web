@@ -65,18 +65,19 @@ async def upload_excel(
         # 解析策略数据
         matcher = FirewallMatcher(db)
         for row in excel_data['data']:
+            # 使用标准化后的字段名
             policy = Policy(
                 order_id=order.id,
                 source_zone=row.get('源区域', ''),
-                dest_zone=row.get('目标区域', ''),
+                dest_zone=row.get('目的区域', ''),  # 注意：标准化后是"目的区域"
                 source_ip=row.get('源IP', ''),
-                dest_ip=row.get('目标IP', ''),
-                service=row.get('服务', ''),
+                dest_ip=row.get('目的IP', ''),  # 注意：标准化后是"目的IP"
+                service=row.get('目的端口', ''),  # 注意：标准化后是"目的端口"
                 action=row.get('动作', 'permit')
             )
             
             # 匹配防火墙
-            dest_ip = row.get('目标IP', '')
+            dest_ip = row.get('目的IP', '')  # 注意：标准化后是"目的IP"
             if dest_ip:
                 firewall_id = matcher.match_by_ip(dest_ip.split('/')[0].split('-')[0])
                 policy.firewall_id = firewall_id
