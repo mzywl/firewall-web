@@ -36,11 +36,6 @@ const routes: RouteRecordRaw[] = [
     path: '/config',
     name: 'Config',
     component: () => import('@/views/ConfigPage.vue')
-  },
-  {
-    path: '/logs',
-    name: 'Logs',
-    component: () => import('@/views/LogsPage.vue')
   }
 ]
 

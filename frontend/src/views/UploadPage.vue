@@ -9,6 +9,17 @@
           <span>上传防火墙策略文件</span>
         </template>
         
+        <el-form :model="uploadForm" label-width="100px" class="upload-form">
+          <el-form-item label="工单号">
+            <el-input 
+              v-model="uploadForm.orderId" 
+              placeholder="留空自动生成（ORD-时间戳）"
+              clearable
+            />
+            <div class="form-tip">可选，默认自动生成工单号</div>
+          </el-form-item>
+        </el-form>
+        
         <FileUpload @success="handleUploadSuccess" />
       </el-card>
     </el-main>
@@ -16,6 +27,7 @@
 </template>
 
 <script setup lang="ts">
+import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import FileUpload from '@/components/FileUpload.vue'
@@ -25,12 +37,19 @@ import { useOrderStore } from '@/store/order'
 const router = useRouter()
 const orderStore = useOrderStore()
 
+const uploadForm = ref({
+  orderId: ''
+})
+
 const handleUploadSuccess = async (file: File) => {
   try {
+    // 如果没有输入工单号，生成默认工单号
+    const orderId = uploadForm.value.orderId || `ORD-${Date.now()}`
+    
     const response = await uploadFile(file)
     
     // 保存工单信息到 store
-    orderStore.setOrderId(response.orderId)
+    orderStore.setOrderId(orderId)
     orderStore.setFileName(response.fileName)
     orderStore.setOriginalData(response.originalData)
     
@@ -68,5 +87,15 @@ const handleUploadSuccess = async (file: File) => {
 .el-card {
   max-width: 800px;
   margin: 0 auto;
+}
+
+.upload-form {
+  margin-bottom: 20px;
+}
+
+.form-tip {
+  font-size: 12px;
+  color: #909399;
+  margin-top: 5px;
 }
 </style>

@@ -181,9 +181,10 @@ watch(() => pushStore.logs.length, () => {
 const handleStart = () => {
   if (!orderStore.currentOrder.orderId) return
 
-  // 获取所有防火墙 ID（实际应该从预览页面传递）
+  // 获取所有防火墙 ID（实际应该从预览页面传递或从数据中提取）
   const firewallIds = ['firewall-1', 'firewall-2']
   
+  ElMessage.info('开始推送策略...')
   websocketService.startPush(orderStore.currentOrder.orderId, firewallIds)
 }
 

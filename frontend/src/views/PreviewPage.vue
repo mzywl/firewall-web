@@ -177,6 +177,7 @@ const handleConfirmPush = async () => {
       }
     )
 
+    // 跳转到推送页面
     router.push('/push')
   } catch {
     // 用户取消
