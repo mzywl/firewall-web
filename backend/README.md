@@ -1,160 +1,145 @@
 # Firewall Policy Automation System - Backend API
 
-## 更新内容
+## Phase 2 更新 - WebSocket 推送功能
 
-### Phase 1 Week 2 - 核心 API 实现 ✅
+### 新增功能
 
-**新增功能：**
+**1. WebSocket 服务端** (`app/core/websocket.py`)
+- 集成 Socket.IO 到 FastAPI
+- 支持客户端连接/断开
+- 房间管理（按工单 ID 分组）
+- 实时事件广播：
+  - `push_progress` - 推送进度
+  - `push_log` - 推送日志
+  - `push_status` - 推送状态变更
 
-1. **Excel 解析模块** (`app/core/excel_parser.py`)
-   - 支持 .xlsx/.xls 文件解析
-   - 自动读取表头和数据
-   - 标准化 IP 地址和端口格式
-   - 日期格式化处理
+**2. 策略合并优化算法** (`app/core/policy_merger.py`)
+- 相同源IP、目的IP、协议的策略合并
+- 端口范围优化（连续端口合并）
+- 冗余策略检测
 
-2. **防火墙匹配模块** (`app/core/firewall_matcher.py`)
-   - 根据 IP 地址自动匹配防火墙设备
-   - 支持 CIDR 格式（192.168.1.0/24）
-   - 批量 IP 匹配
+**3. 推送控制 API** (`app/api/push.py`)
+- `POST /api/push/orders/{order_id}/start` - 开始推送
+- `POST /api/push/orders/{order_id}/merge` - 策略合并分析
+- `GET /api/push/orders/{order_id}/status` - 获取推送状态
 
-3. **核心 API 接口** (`app/api/orders.py`)
-   - `POST /api/orders/upload` - 上传 Excel 文件并创建工单
-   - `GET /api/orders/{order_id}` - 获取工单详情
-   - `GET /api/orders/{order_id}/policies` - 获取工单的所有策略
-   - `PUT /api/orders/{order_id}/policies` - 批量更新策略
+**4. Celery 异步推送任务** (`app/tasks/push_tasks.py`)
+- 异步推送策略到防火墙
+- 实时进度更新（通过 WebSocket）
+- 推送日志记录和广播
+- 错误处理和重试机制
 
-4. **数据库迁移配置** (Alembic)
-   - 配置 Alembic 环境
-   - 支持数据库版本管理
+### WebSocket 事件
 
-**技术实现：**
-- 文件上传使用 UUID 生成唯一文件名
-- Excel 解析使用 openpyxl
-- 自动匹配防火墙设备
-- 支持批量策略更新
+**客户端 → 服务端：**
+```javascript
+// 连接
+socket.connect()
 
-## API 文档
+// 加入工单房间
+socket.emit('join_order', { order_id: 1 })
 
-### 1. 上传 Excel 文件
+// 离开工单房间
+socket.emit('leave_order', { order_id: 1 })
+```
+
+**服务端 → 客户端：**
+```javascript
+// 连接成功
+socket.on('connected', (data) => {
+  console.log(data.message)
+})
+
+// 推送进度
+socket.on('push_progress', (data) => {
+  // data: { progress: 50, current: 5, total: 10, success: 4, failed: 1 }
+})
+
+// 推送日志
+socket.on('push_log', (data) => {
+  // data: { level: 'info', message: '...', timestamp: 1234567890 }
+})
+
+// 推送状态变更
+socket.on('push_status', (data) => {
+  // data: { status: 'completed', message: '...', success_count: 10, failed_count: 0 }
+})
+```
+
+### API 文档
+
+#### 1. 开始推送
 
 ```http
-POST /api/orders/upload
-Content-Type: multipart/form-data
-
-参数:
-- file: Excel 文件 (.xlsx/.xls)
-- title: 工单标题（可选）
-- created_by: 创建人（可选）
+POST /api/push/orders/{order_id}/start
 
 响应:
 {
-  "id": 1,
-  "order_no": "ORD-20260305000000",
-  "title": "防火墙策略工单",
-  "status": "pending",
-  "excel_file_path": "uploads/xxx.xlsx",
-  "created_at": "2026-03-05T00:00:00",
-  "updated_at": "2026-03-05T00:00:00"
+  "message": "推送任务已启动",
+  "task_id": "abc-123",
+  "order_id": 1,
+  "policies_count": 10
 }
 ```
 
-### 2. 获取工单详情
+#### 2. 策略合并分析
 
 ```http
-GET /api/orders/{order_id}
+POST /api/push/orders/{order_id}/merge
 
 响应:
 {
-  "id": 1,
-  "order_no": "ORD-20260305000000",
-  "title": "防火墙策略工单",
-  "description": "上传文件: test.xlsx, 共 10 行数据",
-  "status": "pending",
-  "created_at": "2026-03-05T00:00:00"
+  "message": "策略合并分析完成",
+  "original_count": 10,
+  "merged_count": 5,
+  "redundant_count": 2,
+  "redundant_ids": [3, 7],
+  "merged_policies": [...]
 }
 ```
 
-### 3. 获取工单策略列表
+#### 3. 获取推送状态
 
 ```http
-GET /api/orders/{order_id}/policies
-
-响应:
-[
-  {
-    "id": 1,
-    "order_id": 1,
-    "source_zone": "trust",
-    "dest_zone": "untrust",
-    "source_ip": "192.168.1.0/24",
-    "dest_ip": "10.0.0.1",
-    "service": "tcp/80",
-    "action": "permit",
-    "firewall_id": 1,
-    "is_merged": 0,
-    "push_status": null,
-    "created_at": "2026-03-05T00:00:00"
-  }
-]
-```
-
-### 4. 批量更新策略
-
-```http
-PUT /api/orders/{order_id}/policies
-Content-Type: application/json
-
-请求体:
-[
-  {
-    "id": 1,
-    "source_ip": "192.168.2.0/24",
-    "dest_ip": "10.0.0.2"
-  }
-]
+GET /api/push/orders/{order_id}/status
 
 响应:
 {
-  "message": "策略更新成功",
-  "updated_count": 1
+  "order_id": 1,
+  "order_status": "processing",
+  "total": 10,
+  "success": 5,
+  "failed": 1,
+  "pending": 4,
+  "progress": 60
 }
 ```
 
-## 数据库迁移
-
-```bash
-# 初始化迁移（首次）
-alembic revision --autogenerate -m "Initial migration"
-
-# 执行迁移
-alembic upgrade head
-
-# 回滚迁移
-alembic downgrade -1
-```
-
-## 启动应用
+### 启动应用
 
 ```bash
 # 安装依赖
 pip install -r requirements.txt
 
-# 配置环境变量
-cp .env.example .env
-# 编辑 .env 文件，配置数据库连接
-
-# 执行数据库迁移
-alembic upgrade head
-
-# 启动 FastAPI
+# 启动 FastAPI（支持 WebSocket）
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# 启动 Celery Worker
+celery -A app.core.celery_app worker --loglevel=info
+
+# 启动 Redis（如果未运行）
+redis-server
 ```
 
-访问 API 文档：http://localhost:8000/docs
+### WebSocket 连接
 
-## 开发计划
+```
+ws://localhost:8000/socket.io
+```
 
-### Phase 1（Week 1-2）- 基础框架 ✅
+### 开发计划
+
+### Phase 1（Week 1-2）✅
 - [x] FastAPI 项目初始化
 - [x] 数据库表设计
 - [x] Redis + Celery 配置
@@ -162,13 +147,40 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 - [x] 防火墙匹配模块
 - [x] 核心 CRUD API
 
-### Phase 2（Week 3-4）- 核心业务
-- [ ] 策略合并优化算法
-- [ ] WebSocket 实时通信
-- [ ] 工单状态管理
+### Phase 2（Week 3-4）✅
+- [x] WebSocket 服务端
+- [x] 策略合并优化算法
+- [x] 推送控制 API
+- [x] Celery 异步推送任务
+- [x] 实时进度和日志广播
 
-### Phase 3（Week 5-6）- 推送功能
-- [ ] SSH 连接管理
-- [ ] 策略查询模块（4种防火墙）
-- [ ] Celery 异步推送任务
-- [ ] 实时进度反馈
+### Phase 3（Week 5-6）
+- [ ] SSH 连接管理（Paramiko）
+- [ ] 4种防火墙策略查询（FortiGate/Hillstone/LeadSec/H3C）
+- [ ] 实际推送逻辑实现
+- [ ] 推送失败重试机制
+- [ ] 推送历史记录查询
+
+### 技术栈
+
+- **FastAPI** - Web 框架
+- **Socket.IO** - WebSocket 实时通信
+- **Celery** - 异步任务队列
+- **Redis** - 缓存 + Celery broker
+- **SQLAlchemy** - ORM
+- **PostgreSQL** - 数据库
+- **Paramiko** - SSH 连接（待实现）
+
+### 前后端联调
+
+前端已完成 WebSocket 客户端集成，现在可以进行联调测试：
+
+1. 启动后端服务（FastAPI + Celery + Redis）
+2. 启动前端服务
+3. 上传 Excel 文件创建工单
+4. 点击"开始推送"按钮
+5. 实时查看推送进度和日志
+
+---
+
+**Phase 2 完成！** 🎉
