@@ -1,6 +1,6 @@
 """
 API routes initialization
 """
-from . import orders
+from . import orders, push
 
-__all__ = ["orders"]
+__all__ = ["orders", "push"]
