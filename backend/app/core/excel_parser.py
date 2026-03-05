@@ -154,16 +154,23 @@ class ExcelParser:
     def _contains_key_fields(self, row_values: List[str]) -> bool:
         """
         检查行是否包含所有关键字段
+        使用更宽松的匹配策略：只要行中包含关键字段即可
         """
-        found_fields = set()
+        # 将所有单元格值连接成一个字符串，方便查找
+        row_str = " ".join([str(v).strip() for v in row_values if v])
         
-        for value in row_values:
-            for key_field in self.KEY_FIELDS:
-                if key_field in value:
-                    found_fields.add(key_field)
+        # 检查是否包含所有关键字段
+        found_count = 0
+        for key_field in self.KEY_FIELDS:
+            if key_field in row_str:
+                found_count += 1
+                logger.debug(f"找到关键字段: {key_field}")
         
-        # 必须包含所有关键字段
-        return len(found_fields) == len(self.KEY_FIELDS)
+        result = found_count == len(self.KEY_FIELDS)
+        if result:
+            logger.info(f"行包含所有关键字段: {self.KEY_FIELDS}")
+        
+        return result
     
     def _read_data(self, headers: List[str], header_row: int) -> List[Dict[str, Any]]:
         """
