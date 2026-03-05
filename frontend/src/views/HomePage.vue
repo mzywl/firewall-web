@@ -29,10 +29,9 @@ const menuItems = [
   { path: '/upload', title: '文件上传', description: '上传防火墙策略文件', icon: Upload },
   { path: '/edit', title: '策略编辑', description: '编辑和修改策略规则', icon: Edit },
   { path: '/preview', title: '策略预览', description: '查看格式化后的策略', icon: View },
-  { path: '/push', title: '策略推送', description: '推送策略到防火墙', icon: Promotion },
+  { path: '/push', title: '推送进度', description: '查看策略推送进度', icon: Promotion },
   { path: '/history', title: '历史记录', description: '查看推送历史', icon: Clock },
-  { path: '/config', title: '防火墙配置', description: '管理防火墙设备', icon: Setting },
-  { path: '/logs', title: '操作日志', description: '查看系统日志', icon: Document }
+  { path: '/config', title: '防火墙配置', description: '管理防火墙设备', icon: Setting }
 ]
 
 const navigateTo = (path: string) => {
