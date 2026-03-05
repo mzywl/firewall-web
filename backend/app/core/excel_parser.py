@@ -5,6 +5,9 @@ import openpyxl
 from typing import List, Dict, Any, Optional, Tuple
 import re
 from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class ExcelParser:
@@ -12,6 +15,41 @@ class ExcelParser:
     
     # 关键字段，用于查找真正的表头
     KEY_FIELDS = ["源IP", "目的IP", "目的端口"]
+    
+    # 字段映射：Excel表头 -> 标准字段名
+    FIELD_MAPPING = {
+        # 源IP相关
+        "源IP": "源IP",
+        "源ip": "源IP",
+        "源地址": "源IP",
+        "源IP地址": "源IP",
+        
+        # 目的IP相关
+        "目的IP": "目的IP",
+        "目的ip": "目的IP",
+        "目标IP": "目的IP",
+        "目的地址": "目的IP",
+        "目的IP地址": "目的IP",
+        
+        # 端口相关
+        "目的端口": "目的端口",
+        "目标端口": "目的端口",
+        "端口": "目的端口",
+        "服务端口": "目的端口",
+        "服务": "目的端口",
+        
+        # 区域相关
+        "源区域": "源区域",
+        "源安全域": "源区域",
+        "目的区域": "目的区域",
+        "目标区域": "目的区域",
+        "目的安全域": "目的区域",
+        
+        # 动作相关
+        "动作": "动作",
+        "策略动作": "动作",
+        "action": "动作",
+    }
     
     def __init__(self, file_path: str):
         self.file_path = file_path
@@ -33,18 +71,29 @@ class ExcelParser:
             
             # 1. 优先读取名称包含"网络策略"的 sheet
             self.sheet = self._find_network_policy_sheet()
+            logger.info(f"使用 sheet: {self.sheet.title}")
             
             # 2. 查找真正的表头行
             header_row, headers = self._find_real_header()
+            logger.info(f"表头行: {header_row}, 表头: {headers}")
             
             if not headers:
                 raise Exception("未找到包含关键字段（源IP、目的IP、目的端口）的表头行")
             
             # 3. 读取数据（从表头行之后开始）
             data = self._read_data(headers, header_row)
+            logger.info(f"读取到 {len(data)} 行数据")
             
-            # 4. 删除示例策略
+            # 4. 标准化字段名
+            data = self._normalize_field_names(data)
+            
+            # 5. 删除示例策略
             data = self._remove_example_policies(data)
+            logger.info(f"过滤后剩余 {len(data)} 行数据")
+            
+            # 打印第一行数据用于调试
+            if data:
+                logger.info(f"第一行数据示例: {data[0]}")
             
             return {
                 "headers": headers,
@@ -53,6 +102,7 @@ class ExcelParser:
                 "header_row": header_row
             }
         except Exception as e:
+            logger.error(f"Excel 解析失败: {str(e)}")
             raise Exception(f"Excel 解析失败: {str(e)}")
         finally:
             if self.workbook:
@@ -75,15 +125,17 @@ class ExcelParser:
         从第一行开始查找包含关键字段的行作为表头
         返回: (表头行号, 表头列表)
         """
-        for row_idx in range(1, self.sheet.max_row + 1):
+        for row_idx in range(1, min(self.sheet.max_row + 1, 20)):  # 只查找前20行
             row = list(self.sheet[row_idx])
             row_values = [str(cell.value).strip() if cell.value else "" for cell in row]
             
             # 检查是否包含所有关键字段
             if self._contains_key_fields(row_values):
+                logger.info(f"找到表头行: 第 {row_idx} 行")
                 return row_idx, row_values
         
         # 如果没有找到，返回第一行作为表头
+        logger.warning("未找到包含关键字段的表头行，使用第一行")
         first_row = list(self.sheet[1])
         headers = [str(cell.value).strip() if cell.value else "" for cell in first_row]
         return 1, headers
@@ -124,6 +176,25 @@ class ExcelParser:
                 data.append(row_data)
         
         return data
+    
+    def _normalize_field_names(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        标准化字段名
+        将 Excel 中的各种字段名映射到标准字段名
+        """
+        normalized_data = []
+        
+        for row in data:
+            normalized_row = {}
+            
+            for key, value in row.items():
+                # 查找映射的标准字段名
+                standard_key = self.FIELD_MAPPING.get(key, key)
+                normalized_row[standard_key] = value
+            
+            normalized_data.append(normalized_row)
+        
+        return normalized_data
     
     def _remove_example_policies(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
