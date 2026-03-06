@@ -1,8 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw } from 'vue-router'
-
-import { createRouter, createWebHistory } from 'vue-router'
-import type { RouteRecordRaw } from 'vue-router'
 import WorkflowLayout from '@/components/WorkflowLayout.vue'
 
 const routes: RouteRecordRaw[] = [
