@@ -79,7 +79,7 @@ async def upload_excel(
         )
         db.add(formatted_version)
         db.commit()
-        
+
         # 解析策略数据
         matcher = FirewallMatcher(db)
         for row in excel_data['data']:
@@ -93,13 +93,13 @@ async def upload_excel(
                 service=str(row.get('目的端口', '')),  # 强制转换为字符串
                 action=str(row.get('动作', 'permit'))
             )
-            
+
             # 匹配防火墙
             dest_ip = row.get('目的IP', '')  # 注意：标准化后是"目的IP"
             if dest_ip:
                 # 使用 IPFormatter 提取第一个 IP 地址
                 first_ip = IPFormatter.extract_first_ip(dest_ip)
-                
+
                 # 只有当 IP 格式正确时才匹配防火墙
                 if first_ip and '.' in first_ip:
                     try:
@@ -108,12 +108,25 @@ async def upload_excel(
                     except Exception as e:
                         # 匹配失败不影响策略保存
                         pass
-            
+
             db.add(policy)
-        
+
         db.commit()
-        
-        return order
+
+        # 返回包含版本数据的响应
+        return {
+            "id": order.id,
+            "order_no": order.order_no,
+            "title": order.title,
+            "description": order.description,
+            "status": order.status,
+            "excel_file_path": order.excel_file_path,
+            "created_by": order.created_by,
+            "created_at": order.created_at,
+            "updated_at": order.updated_at,
+            "original_data": excel_data['original_data'],
+            "formatted_data": excel_data['formatted_data']
+        }
         
     except Exception as e:
         db.rollback()

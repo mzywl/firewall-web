@@ -45,18 +45,16 @@ const uploadForm = ref({
 
 const handleUploadSuccess = async (file: File) => {
   try {
-    // 如果没有输入工单号，生成默认工单号
-    const orderId = uploadForm.value.orderId || `ORD-${Date.now()}`
-    
     const response = await uploadFile(file)
-    
+
     // 保存工单信息到 store
-    orderStore.setOrderId(orderId)
-    orderStore.setFileName(response.fileName)
-    orderStore.setOriginalData(response.originalData)
-    
+    orderStore.setOrderId(response.id.toString())
+    orderStore.setFileName(response.title)
+    orderStore.setOriginalData(response.original_data)
+    orderStore.setFormattedData(response.formatted_data)
+
     ElMessage.success('文件上传成功！')
-    
+
     // 自动跳转到编辑页面
     setTimeout(() => {
       router.push('/workflow/edit')

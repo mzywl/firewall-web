@@ -1,9 +1,17 @@
 import request from './request'
 
 export interface UploadResponse {
-  orderId: string
-  fileName: string
-  originalData: any[]
+  id: number
+  order_no: string
+  title: string
+  description: string
+  status: string
+  excel_file_path: string
+  created_by: string | null
+  created_at: string
+  updated_at: string
+  original_data: any[]
+  formatted_data: any[]
 }
 
 export interface UpdatePoliciesRequest {
@@ -29,4 +37,9 @@ export const updatePolicies = (orderId: string, data: UpdatePoliciesRequest) => 
 // 获取工单详情
 export const getOrderDetail = (orderId: string) => {
   return request.get(`/orders/${orderId}`)
+}
+
+// 获取策略合并分析
+export const getMergeAnalysis = (orderId: string) => {
+  return request.post(`/push/orders/${orderId}/merge`)
 }
