@@ -79,8 +79,24 @@ async def upload_excel(
             # 匹配防火墙
             dest_ip = row.get('目的IP', '')  # 注意：标准化后是"目的IP"
             if dest_ip:
-                firewall_id = matcher.match_by_ip(dest_ip.split('/')[0].split('-')[0])
-                policy.firewall_id = firewall_id
+                # 提取第一个 IP 地址（处理多种分隔符）
+                first_ip = dest_ip.strip()
+                # 处理中文顿号、逗号、换行符
+                for sep in ['、', ',', '\n', ' ']:
+                    if sep in first_ip:
+                        first_ip = first_ip.split(sep)[0].strip()
+                        break
+                # 处理 CIDR 和 IP 段
+                first_ip = first_ip.split('/')[0].split('-')[0].strip()
+                
+                # 只有当 IP 格式正确时才匹配防火墙
+                if first_ip and '.' in first_ip:
+                    try:
+                        firewall_id = matcher.match_by_ip(first_ip)
+                        policy.firewall_id = firewall_id
+                    except Exception as e:
+                        # 匹配失败不影响策略保存
+                        pass
             
             db.add(policy)
         
