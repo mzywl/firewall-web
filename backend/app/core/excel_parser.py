@@ -96,11 +96,17 @@ class ExcelParser:
             data = self._read_data(headers, header_row)
             logger.info(f"读取到 {len(data)} 行数据")
             
+            # 保存原始数据（用于版本追溯）
+            original_data = [dict(row) for row in data]
+            
             # 4. 标准化字段名
             data = self._normalize_field_names(data)
             
             # 5. 格式化 IP 地址
             data = self._format_ip_addresses(data)
+            
+            # 保存格式化后的数据（用于版本追溯）
+            formatted_data = [dict(row) for row in data]
             
             # 6. 删除示例策略
             data = self._remove_example_policies(data)
@@ -113,6 +119,8 @@ class ExcelParser:
             return {
                 "headers": headers,
                 "data": data,
+                "original_data": original_data,
+                "formatted_data": formatted_data,
                 "total_rows": len(data),
                 "header_row": header_row
             }

@@ -124,3 +124,21 @@ class OperationLogResponse(OperationLogCreate):
 
     class Config:
         from_attributes = True
+
+
+# PolicyVersion Schemas
+class PolicyVersionCreate(BaseModel):
+    order_id: int
+    version_type: str  # 'original', 'formatted', 'user_modified'
+    data: dict
+
+
+class PolicyVersionResponse(BaseModel):
+    id: int
+    order_id: int
+    version_type: str
+    data: dict
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 
 from app.database import get_db
-from app.models import Order, Policy, OrderStatus
+from app.models import Order, Policy, OrderStatus, PolicyVersion
 from app.schemas import OrderResponse, OrderCreate, PolicyResponse
 from app.core.excel_parser import ExcelParser
 from app.core.firewall_matcher import FirewallMatcher
@@ -63,6 +63,23 @@ async def upload_excel(
         db.commit()
         db.refresh(order)
         
+        # 保存原始版本
+        original_version = PolicyVersion(
+            order_id=order.id,
+            version_type='original',
+            data={'policies': excel_data['original_data']}
+        )
+        db.add(original_version)
+        
+        # 保存格式化版本
+        formatted_version = PolicyVersion(
+            order_id=order.id,
+            version_type='formatted',
+            data={'policies': excel_data['formatted_data']}
+        )
+        db.add(formatted_version)
+        db.commit()
+        
         # 解析策略数据
         matcher = FirewallMatcher(db)
         for row in excel_data['data']:
@@ -115,16 +132,59 @@ def get_order(order_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/{order_id}/policies", response_model=List[PolicyResponse])
-def get_order_policies(order_id: int, db: Session = Depends(get_db)):
+def get_order_policies(
+    order_id: int, 
+    version: str = None,
+    db: Session = Depends(get_db)
+):
     """
     获取工单的所有策略
+    version 参数：original / formatted / user_modified（默认返回当前策略）
     """
     order = db.query(Order).filter(Order.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="工单不存在")
     
+    # 如果指定了版本，返回版本数据
+    if version:
+        policy_version = db.query(PolicyVersion).filter(
+            PolicyVersion.order_id == order_id,
+            PolicyVersion.version_type == version
+        ).first()
+        
+        if not policy_version:
+            raise HTTPException(status_code=404, detail=f"版本 {version} 不存在")
+        
+        # 返回版本数据（转换为 PolicyResponse 格式）
+        return policy_version.data.get('policies', [])
+    
+    # 默认返回当前策略
     policies = db.query(Policy).filter(Policy.order_id == order_id).all()
     return policies
+
+
+@router.get("/{order_id}/versions")
+def get_order_versions(order_id: int, db: Session = Depends(get_db)):
+    """
+    获取工单的所有版本列表
+    """
+    order = db.query(Order).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="工单不存在")
+    
+    versions = db.query(PolicyVersion).filter(
+        PolicyVersion.order_id == order_id
+    ).order_by(PolicyVersion.created_at).all()
+    
+    return [
+        {
+            "id": v.id,
+            "version_type": v.version_type,
+            "created_at": v.created_at,
+            "policy_count": len(v.data.get('policies', []))
+        }
+        for v in versions
+    ]
 
 
 @router.put("/{order_id}/policies")
@@ -135,6 +195,7 @@ def update_policies(
 ):
     """
     批量更新策略
+    自动保存 user_modified 版本
     """
     order = db.query(Order).filter(Order.id == order_id).first()
     if not order:
@@ -158,6 +219,39 @@ def update_policies(
                         setattr(policy, key, value)
         
         db.commit()
+        
+        # 保存用户修改版本
+        # 获取所有策略数据
+        all_policies = db.query(Policy).filter(Policy.order_id == order_id).all()
+        policies_dict = [
+            {
+                'id': p.id,
+                'source_zone': p.source_zone,
+                'dest_zone': p.dest_zone,
+                'source_ip': p.source_ip,
+                'dest_ip': p.dest_ip,
+                'service': p.service,
+                'action': p.action,
+                'firewall_id': p.firewall_id
+            }
+            for p in all_policies
+        ]
+        
+        # 删除旧的 user_modified 版本（如果存在）
+        db.query(PolicyVersion).filter(
+            PolicyVersion.order_id == order_id,
+            PolicyVersion.version_type == 'user_modified'
+        ).delete()
+        
+        # 创建新的 user_modified 版本
+        user_version = PolicyVersion(
+            order_id=order_id,
+            version_type='user_modified',
+            data={'policies': policies_dict}
+        )
+        db.add(user_version)
+        db.commit()
+        
         return {"message": "策略更新成功", "updated_count": len(policies_data)}
         
     except Exception as e:

@@ -108,3 +108,17 @@ class OperationLog(Base):
     
     # 关联关系
     order = relationship("Order", back_populates="logs")
+
+
+class PolicyVersion(Base):
+    """策略版本表"""
+    __tablename__ = "policy_versions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    order_id = Column(Integer, ForeignKey("orders.id"), nullable=False, index=True, comment="工单ID")
+    version_type = Column(String(20), nullable=False, comment="版本类型: original/formatted/user_modified")
+    data = Column(JSON, nullable=False, comment="策略数据(JSON格式)")
+    created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
+    
+    # 关联关系
+    order = relationship("Order")
