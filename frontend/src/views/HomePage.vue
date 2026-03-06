@@ -21,15 +21,12 @@
 
 <script setup lang="ts">
 import { useRouter } from 'vue-router'
-import { Upload, Edit, View, Promotion, Clock, Setting, Document } from '@element-plus/icons-vue'
+import { Upload, Clock, Setting } from '@element-plus/icons-vue'
 
 const router = useRouter()
 
 const menuItems = [
-  { path: '/upload', title: '文件上传', description: '上传防火墙策略文件', icon: Upload },
-  { path: '/edit', title: '策略编辑', description: '编辑和修改策略规则', icon: Edit },
-  { path: '/preview', title: '策略预览', description: '查看格式化后的策略', icon: View },
-  { path: '/push', title: '推送进度', description: '查看策略推送进度', icon: Promotion },
+  { path: '/workflow/upload', title: '开始推送', description: '上传策略文件并开始推送流程', icon: Upload },
   { path: '/history', title: '历史记录', description: '查看推送历史', icon: Clock },
   { path: '/config', title: '防火墙配置', description: '管理防火墙设备', icon: Setting }
 ]
