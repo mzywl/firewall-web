@@ -44,8 +44,11 @@
     <div class="step-actions">
       <el-button @click="handlePrev">上一步</el-button>
       <div class="right-actions">
+        <el-checkbox v-model="autoExecute" class="auto-execute-checkbox">
+          自动执行推送
+        </el-checkbox>
         <el-button @click="handleSave" :loading="saving">保存</el-button>
-        <el-button type="primary" @click="handleNext">下一步</el-button>
+        <el-button type="primary" @click="handleNext" :loading="nextLoading">下一步</el-button>
       </div>
     </div>
   </div>
@@ -66,6 +69,8 @@ const originalData = ref<any[]>([])
 const formattedData = ref<any[]>([])
 const columns = ref<string[]>([])
 const saving = ref(false)
+const nextLoading = ref(false)
+const autoExecute = ref(false)
 
 onMounted(() => {
   if (!orderStore.currentOrder.orderId) {
@@ -96,6 +101,8 @@ const handleOriginalDataChange = (data: any[]) => {
 const handleFormattedDataChange = (data: any[]) => {
   formattedData.value = data
   orderStore.setFormattedData(data)
+  // 同时保存到用户修改数据
+  orderStore.setUserModifiedData(data)
 }
 
 const formatData = () => {
@@ -112,13 +119,19 @@ const handleSave = async () => {
 
   saving.value = true
   try {
+    // 保存用户修改后的数据
     await updatePolicies(orderStore.currentOrder.orderId, {
       policies: formattedData.value
     })
+    
+    // 更新用户修改数据
+    orderStore.setUserModifiedData(formattedData.value)
+    
     ElMessage.success('保存成功')
   } catch (error) {
     console.error('Save error:', error)
     ElMessage.error('保存失败')
+    throw error
   } finally {
     saving.value = false
   }
@@ -134,11 +147,26 @@ const handleNext = async () => {
     return
   }
 
-  // 自动保存
-  await handleSave()
-  
-  // 跳转到预览页面
-  router.push('/workflow/preview')
+  nextLoading.value = true
+
+  try {
+    // 自动保存数据
+    await handleSave()
+    
+    if (autoExecute.value) {
+      // 自动执行模式：直接跳转到推送页面
+      ElMessage.success('已开启自动执行，正在跳转到推送页面...')
+      router.push('/workflow/push')
+    } else {
+      // 手动模式：跳转到预览页面
+      router.push('/workflow/preview')
+    }
+  } catch (error) {
+    console.error('Next error:', error)
+    ElMessage.error('操作失败')
+  } finally {
+    nextLoading.value = false
+  }
 }
 </script>
 
@@ -189,5 +217,10 @@ const handleNext = async () => {
 .right-actions {
   display: flex;
   gap: 10px;
+  align-items: center;
+}
+
+.auto-execute-checkbox {
+  margin-right: 10px;
 }
 </style>
