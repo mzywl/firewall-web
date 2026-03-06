@@ -10,6 +10,7 @@ from app.models import Order, Policy, OrderStatus
 from app.schemas import OrderResponse, OrderCreate, PolicyResponse
 from app.core.excel_parser import ExcelParser
 from app.core.firewall_matcher import FirewallMatcher
+from app.core.ip_formatter import IPFormatter
 
 router = APIRouter(prefix="/api/orders", tags=["orders"])
 
@@ -79,15 +80,8 @@ async def upload_excel(
             # 匹配防火墙
             dest_ip = row.get('目的IP', '')  # 注意：标准化后是"目的IP"
             if dest_ip:
-                # 提取第一个 IP 地址（处理多种分隔符）
-                first_ip = dest_ip.strip()
-                # 处理中文顿号、逗号、换行符
-                for sep in ['、', ',', '\n', ' ']:
-                    if sep in first_ip:
-                        first_ip = first_ip.split(sep)[0].strip()
-                        break
-                # 处理 CIDR 和 IP 段
-                first_ip = first_ip.split('/')[0].split('-')[0].strip()
+                # 使用 IPFormatter 提取第一个 IP 地址
+                first_ip = IPFormatter.extract_first_ip(dest_ip)
                 
                 # 只有当 IP 格式正确时才匹配防火墙
                 if first_ip and '.' in first_ip:
