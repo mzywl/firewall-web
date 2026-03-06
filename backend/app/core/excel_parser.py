@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Optional, Tuple
 import re
 from datetime import datetime
 import logging
+from app.core.ip_formatter import IPFormatter
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +99,10 @@ class ExcelParser:
             # 4. 标准化字段名
             data = self._normalize_field_names(data)
             
-            # 5. 删除示例策略
+            # 5. 格式化 IP 地址
+            data = self._format_ip_addresses(data)
+            
+            # 6. 删除示例策略
             data = self._remove_example_policies(data)
             logger.info(f"过滤后剩余 {len(data)} 行数据")
             
@@ -215,6 +219,22 @@ class ExcelParser:
             normalized_data.append(normalized_row)
         
         return normalized_data
+    
+    def _format_ip_addresses(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        格式化 IP 地址
+        处理多种分隔符，添加掩码，合并连续 IP
+        """
+        for row in data:
+            # 格式化源 IP
+            if '源IP' in row and row['源IP']:
+                row['源IP'] = IPFormatter.format_ip_list(row['源IP'])
+            
+            # 格式化目的 IP
+            if '目的IP' in row and row['目的IP']:
+                row['目的IP'] = IPFormatter.format_ip_list(row['目的IP'])
+        
+        return data
     
     def _remove_example_policies(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
