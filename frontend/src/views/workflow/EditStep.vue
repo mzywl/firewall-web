@@ -2,42 +2,136 @@
   <div class="workflow-step">
     <div class="step-header">
       <h2>编辑策略数据</h2>
-      <p class="step-desc">编辑原始数据和格式化数据</p>
+      <p class="step-desc">查看格式化数据并进行编辑</p>
     </div>
 
     <div class="step-content">
-      <!-- 原始数据表格 -->
+      <!-- 第一次格式化表格（只读） -->
       <el-card class="table-card">
         <template #header>
           <div class="card-header">
-            <span>原始数据</span>
+            <span>格式化数据（只读）</span>
             <el-tag>{{ orderStore.currentOrder.fileName }}</el-tag>
           </div>
         </template>
-        <TableEditor
-          :data="originalData"
-          :columns="columns"
-          :editable="true"
-          height="300px"
-          @data-change="handleOriginalDataChange"
-        />
+        
+        <el-table 
+          :data="formattedData" 
+          border 
+          stripe
+          max-height="300"
+          style="width: 100%"
+        >
+          <el-table-column type="index" label="#" width="50" />
+          <el-table-column prop="source_zone" label="源区域" min-width="120" />
+          <el-table-column prop="source_ip" label="源IP" min-width="150" />
+          <el-table-column prop="dest_zone" label="目的区域" min-width="120" />
+          <el-table-column prop="dest_ip" label="目的IP" min-width="150" />
+          <el-table-column prop="service" label="目的端口" min-width="120" />
+          <el-table-column prop="action" label="动作" min-width="100" />
+        </el-table>
       </el-card>
 
-      <!-- 格式化数据表格 -->
+      <!-- 第二次格式化表格（可编辑） -->
       <el-card class="table-card">
         <template #header>
           <div class="card-header">
-            <span>格式化数据</span>
-            <el-button size="small" @click="formatData">重新格式化</el-button>
+            <span>用户编辑数据（可编辑）</span>
+            <div class="table-actions">
+              <el-button size="small" @click="addRow">
+                <el-icon><plus /></el-icon> 添加行
+              </el-button>
+              <el-button size="small" @click="copySelected" :disabled="!selectedRows.length">
+                <el-icon><document-copy /></el-icon> 复制
+              </el-button>
+              <el-button size="small" @click="pasteData" :disabled="!clipboardData">
+                <el-icon><document /></el-icon> 粘贴
+              </el-button>
+            </div>
           </div>
         </template>
-        <TableEditor
-          :data="formattedData"
-          :columns="columns"
-          :editable="true"
-          height="300px"
-          @data-change="handleFormattedDataChange"
-        />
+        
+        <el-table 
+          ref="editTableRef"
+          :data="userModifiedData" 
+          border 
+          stripe
+          max-height="400"
+          style="width: 100%"
+          @selection-change="handleSelectionChange"
+        >
+          <el-table-column type="selection" width="55" />
+          <el-table-column type="index" label="#" width="50" />
+          <el-table-column prop="source_zone" label="源区域" min-width="120">
+            <template #default="{ row, $index }">
+              <el-input 
+                v-model="row.source_zone" 
+                @change="handleCellChange($index)"
+                size="small"
+              />
+            </template>
+          </el-table-column>
+          <el-table-column prop="source_ip" label="源IP" min-width="150">
+            <template #default="{ row, $index }">
+              <el-input 
+                v-model="row.source_ip" 
+                @change="handleCellChange($index)"
+                size="small"
+              />
+            </template>
+          </el-table-column>
+          <el-table-column prop="dest_zone" label="目的区域" min-width="120">
+            <template #default="{ row, $index }">
+              <el-input 
+                v-model="row.dest_zone" 
+                @change="handleCellChange($index)"
+                size="small"
+              />
+            </template>
+          </el-table-column>
+          <el-table-column prop="dest_ip" label="目的IP" min-width="150">
+            <template #default="{ row, $index }">
+              <el-input 
+                v-model="row.dest_ip" 
+                @change="handleCellChange($index)"
+                size="small"
+              />
+            </template>
+          </el-table-column>
+          <el-table-column prop="service" label="目的端口" min-width="120">
+            <template #default="{ row, $index }">
+              <el-input 
+                v-model="row.service" 
+                @change="handleCellChange($index)"
+                size="small"
+              />
+            </template>
+          </el-table-column>
+          <el-table-column prop="action" label="动作" min-width="100">
+            <template #default="{ row, $index }">
+              <el-select 
+                v-model="row.action" 
+                @change="handleCellChange($index)"
+                size="small"
+              >
+                <el-option label="允许" value="allow" />
+                <el-option label="拒绝" value="deny" />
+              </el-select>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="100" fixed="right">
+            <template #default="{ $index }">
+              <el-button 
+                type="danger" 
+                size="small" 
+                @click="deleteRow($index)"
+                link
+              >
+                删除
+              </el-button>
+            </template>
+          </el-table-column>
+        </el-table>
       </el-card>
     </div>
 
@@ -58,19 +152,21 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import TableEditor from '@/components/TableEditor.vue'
+import { Plus, DocumentCopy, Document } from '@element-plus/icons-vue'
 import { useOrderStore } from '@/store/order'
 import { updatePolicies } from '@/api/firewall'
 
 const router = useRouter()
 const orderStore = useOrderStore()
 
-const originalData = ref<any[]>([])
 const formattedData = ref<any[]>([])
-const columns = ref<string[]>([])
+const userModifiedData = ref<any[]>([])
 const saving = ref(false)
 const nextLoading = ref(false)
 const autoExecute = ref(false)
+const selectedRows = ref<any[]>([])
+const clipboardData = ref<any[] | null>(null)
+const editTableRef = ref()
 
 onMounted(() => {
   if (!orderStore.currentOrder.orderId) {
@@ -79,39 +175,65 @@ onMounted(() => {
     return
   }
 
-  originalData.value = [...orderStore.currentOrder.originalData]
+  // 加载格式化数据（只读）
   formattedData.value = [...orderStore.currentOrder.formattedData]
   
-  // 提取列名
-  if (originalData.value.length > 0) {
-    columns.value = Object.keys(originalData.value[0])
-  }
-  
-  // 如果没有格式化数据，自动格式化
-  if (formattedData.value.length === 0) {
-    formatData()
+  // 加载用户修改数据（可编辑）
+  if (orderStore.currentOrder.userModifiedData.length > 0) {
+    userModifiedData.value = [...orderStore.currentOrder.userModifiedData]
+  } else {
+    // 如果没有用户修改数据，复制格式化数据作为初始值
+    userModifiedData.value = JSON.parse(JSON.stringify(formattedData.value))
+    orderStore.setUserModifiedData(userModifiedData.value)
   }
 })
 
-const handleOriginalDataChange = (data: any[]) => {
-  originalData.value = data
-  orderStore.setOriginalData(data)
+const handleCellChange = (index: number) => {
+  // 更新 store
+  orderStore.setUserModifiedData(userModifiedData.value)
 }
 
-const handleFormattedDataChange = (data: any[]) => {
-  formattedData.value = data
-  orderStore.setFormattedData(data)
-  // 同时保存到用户修改数据
-  orderStore.setUserModifiedData(data)
+const handleSelectionChange = (selection: any[]) => {
+  selectedRows.value = selection
 }
 
-const formatData = () => {
-  // 简单的格式化逻辑（实际应该调用后端 API）
-  formattedData.value = originalData.value.map(row => ({
-    ...row
-  }))
-  orderStore.setFormattedData(formattedData.value)
-  ElMessage.success('数据格式化完成')
+const addRow = () => {
+  const newRow = {
+    source_zone: '',
+    source_ip: '',
+    dest_zone: '',
+    dest_ip: '',
+    service: '',
+    action: 'allow'
+  }
+  userModifiedData.value.push(newRow)
+  orderStore.setUserModifiedData(userModifiedData.value)
+  ElMessage.success('已添加新行')
+}
+
+const deleteRow = (index: number) => {
+  userModifiedData.value.splice(index, 1)
+  orderStore.setUserModifiedData(userModifiedData.value)
+  ElMessage.success('已删除行')
+}
+
+const copySelected = () => {
+  if (selectedRows.value.length === 0) {
+    ElMessage.warning('请先选择要复制的行')
+    return
+  }
+  clipboardData.value = JSON.parse(JSON.stringify(selectedRows.value))
+  ElMessage.success(`已复制 ${selectedRows.value.length} 行`)
+}
+
+const pasteData = () => {
+  if (!clipboardData.value) {
+    ElMessage.warning('剪贴板为空')
+    return
+  }
+  userModifiedData.value.push(...JSON.parse(JSON.stringify(clipboardData.value)))
+  orderStore.setUserModifiedData(userModifiedData.value)
+  ElMessage.success(`已粘贴 ${clipboardData.value.length} 行`)
 }
 
 const handleSave = async () => {
@@ -121,11 +243,11 @@ const handleSave = async () => {
   try {
     // 保存用户修改后的数据
     await updatePolicies(orderStore.currentOrder.orderId, {
-      policies: formattedData.value
+      policies: userModifiedData.value
     })
     
     // 更新用户修改数据
-    orderStore.setUserModifiedData(formattedData.value)
+    orderStore.setUserModifiedData(userModifiedData.value)
     
     ElMessage.success('保存成功')
   } catch (error) {
@@ -142,7 +264,7 @@ const handlePrev = () => {
 }
 
 const handleNext = async () => {
-  if (formattedData.value.length === 0) {
+  if (userModifiedData.value.length === 0) {
     ElMessage.warning('请先编辑数据')
     return
   }
@@ -205,6 +327,11 @@ const handleNext = async () => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+
+.table-actions {
+  display: flex;
+  gap: 10px;
 }
 
 .step-actions {
