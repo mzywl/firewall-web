@@ -69,12 +69,12 @@ async def upload_excel(
             # 使用标准化后的字段名
             policy = Policy(
                 order_id=order.id,
-                source_zone=row.get('源区域', ''),
-                dest_zone=row.get('目的区域', ''),  # 注意：标准化后是"目的区域"
-                source_ip=row.get('源IP', ''),
-                dest_ip=row.get('目的IP', ''),  # 注意：标准化后是"目的IP"
-                service=row.get('目的端口', ''),  # 注意：标准化后是"目的端口"
-                action=row.get('动作', 'permit')
+                source_zone=str(row.get('源区域', '')),
+                dest_zone=str(row.get('目的区域', '')),  # 注意：标准化后是"目的区域"
+                source_ip=str(row.get('源IP', '')),
+                dest_ip=str(row.get('目的IP', '')),  # 注意：标准化后是"目的IP"
+                service=str(row.get('目的端口', '')),  # 强制转换为字符串
+                action=str(row.get('动作', 'permit'))
             )
             
             # 匹配防火墙
