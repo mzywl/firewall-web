@@ -139,7 +139,15 @@ def get_order_policies(
 ):
     """
     获取工单的所有策略
-    version 参数：original / formatted / user_modified（默认返回当前策略）
+    
+    version 参数：
+    - original: 用户上传的原始数据（只读）
+    - formatted: 第一次自动格式化后的数据（只读）
+    - user_modified: 用户手动编辑后的数据（可编辑）
+    - 不传参数：返回当前策略（默认）
+    
+    特殊处理：
+    - 如果请求 user_modified 但不存在，返回 formatted 版本作为初始数据
     """
     order = db.query(Order).filter(Order.id == order_id).first()
     if not order:
@@ -151,6 +159,13 @@ def get_order_policies(
             PolicyVersion.order_id == order_id,
             PolicyVersion.version_type == version
         ).first()
+        
+        # 特殊处理：如果请求 user_modified 但不存在，返回 formatted 版本
+        if not policy_version and version == 'user_modified':
+            policy_version = db.query(PolicyVersion).filter(
+                PolicyVersion.order_id == order_id,
+                PolicyVersion.version_type == 'formatted'
+            ).first()
         
         if not policy_version:
             raise HTTPException(status_code=404, detail=f"版本 {version} 不存在")
