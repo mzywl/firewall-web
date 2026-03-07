@@ -83,19 +83,19 @@ async def upload_excel(
         # 解析策略数据
         matcher = FirewallMatcher(db)
         for row in excel_data['data']:
-            # 使用标准化后的字段名
+            # 使用标准化后的英文字段名
             policy = Policy(
                 order_id=order.id,
-                source_zone=str(row.get('源区域', '')),
-                dest_zone=str(row.get('目的区域', '')),  # 注意：标准化后是"目的区域"
-                source_ip=str(row.get('源IP', '')),
-                dest_ip=str(row.get('目的IP', '')),  # 注意：标准化后是"目的IP"
-                service=str(row.get('目的端口', '')),  # 强制转换为字符串
-                action=str(row.get('动作', 'permit'))
+                source_zone=str(row.get('source_zone', '')),
+                dest_zone=str(row.get('dest_zone', '')),
+                source_ip=str(row.get('source_ip', '')),
+                dest_ip=str(row.get('dest_ip', '')),
+                service=str(row.get('service', '')),  # 强制转换为字符串
+                action=str(row.get('action', 'permit'))
             )
 
             # 匹配防火墙
-            dest_ip = row.get('目的IP', '')  # 注意：标准化后是"目的IP"
+            dest_ip = row.get('dest_ip', '')
             if dest_ip:
                 # 使用 IPFormatter 提取第一个 IP 地址
                 first_ip = IPFormatter.extract_first_ip(dest_ip)

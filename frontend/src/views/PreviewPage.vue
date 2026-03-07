@@ -109,36 +109,12 @@
 
             <el-table :data="group.policies" border stripe>
               <el-table-column type="index" label="#" width="50" />
-              <el-table-column label="源区域" min-width="120" show-overflow-tooltip>
-                <template #default="{ row }">
-                  {{ row['源区域'] || row.source_zone || '' }}
-                </template>
-              </el-table-column>
-              <el-table-column label="源IP" min-width="150" show-overflow-tooltip>
-                <template #default="{ row }">
-                  {{ row['源IP'] || row.source_ip || '' }}
-                </template>
-              </el-table-column>
-              <el-table-column label="目的区域" min-width="120" show-overflow-tooltip>
-                <template #default="{ row }">
-                  {{ row['目的区域'] || row.dest_zone || '' }}
-                </template>
-              </el-table-column>
-              <el-table-column label="目的IP" min-width="150" show-overflow-tooltip>
-                <template #default="{ row }">
-                  {{ row['目的IP'] || row.dest_ip || '' }}
-                </template>
-              </el-table-column>
-              <el-table-column label="目的端口" min-width="120" show-overflow-tooltip>
-                <template #default="{ row }">
-                  {{ row['目的端口'] || row.service || '' }}
-                </template>
-              </el-table-column>
-              <el-table-column label="动作" min-width="100">
-                <template #default="{ row }">
-                  {{ row['动作'] || row.action || '' }}
-                </template>
-              </el-table-column>
+              <el-table-column prop="source_zone" label="源区域" min-width="120" show-overflow-tooltip />
+              <el-table-column prop="source_ip" label="源IP" min-width="150" show-overflow-tooltip />
+              <el-table-column prop="dest_zone" label="目的区域" min-width="120" show-overflow-tooltip />
+              <el-table-column prop="dest_ip" label="目的IP" min-width="150" show-overflow-tooltip />
+              <el-table-column prop="service" label="目的端口" min-width="120" show-overflow-tooltip />
+              <el-table-column prop="action" label="动作" min-width="100" />
               <el-table-column label="状态" width="100">
                 <template #default="{ row }">
                   <el-tag v-if="row._status === 'new'" type="success" size="small">新增</el-tag>
