@@ -4,8 +4,10 @@ Excel 文件解析模块
 import openpyxl
 from typing import List, Dict, Any, Optional, Tuple
 import re
-from datetime import datetime
+from datetime import datetime, date
+import calendar
 import logging
+from dateutil.relativedelta import relativedelta
 from app.core.ip_formatter import IPFormatter,PortFormatter
 
 logger = logging.getLogger(__name__)
@@ -106,9 +108,10 @@ class ExcelParser:
             formatted_v1_data = self._format_ip_addresses([dict(row) for row in data])
             logger.info(f"第一次格式化完成，共 {len(formatted_v1_data)} 行数据")
 
-            # 5. 第二次格式化：删除示例策略（保留中文列头）
+            # 5. 第二次格式化：删除示例策略 + 格式化使用时间（保留中文列头）
             formatted_v2_data = self._remove_example_policies([dict(row) for row in formatted_v1_data])
-            logger.info(f"第二次格式化完成（删除示例策略），剩余 {len(formatted_v2_data)} 行数据")
+            formatted_v2_data = self._format_usage_time(formatted_v2_data)
+            logger.info(f"第二次格式化完成（删除示例策略 + 格式化使用时间），剩余 {len(formatted_v2_data)} 行数据")
 
             # 6. 转换成英文字段名（用于保存到 Policy 表）
             normalized_data = self._normalize_field_names([dict(row) for row in formatted_v2_data])
@@ -341,6 +344,67 @@ class ExcelParser:
             filtered_data.append(row)
 
         return filtered_data
+
+    def _format_usage_time(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        格式化使用时间字段
+        规则：
+        1. "长期" → "长期"
+        2. "X个月" → 计算当前日期 + X个月，返回该月最后一天（YYYY/MM/DD）
+        3. 日期格式（20XX/XX/XX 或 20XX-XX-XX）→ 返回该月最后一天
+        4. 其他情况 → "长期"
+        """
+        for row in data:
+            # 查找使用时间字段
+            time_key = None
+            for key in row.keys():
+                if key in ['使用时间', 'usage_time', '有效期', '规则有效期']:
+                    time_key = key
+                    break
+            
+            if not time_key or not row.get(time_key):
+                continue
+            
+            time_value = str(row[time_key]).strip()
+            
+            # 去除特殊字符
+            time_value = re.sub('[\u4e00-\u9fa5]', lambda m: m.group() if m.group() in ['长期', '个月', '年', '月', '日'] else '', time_value)
+            time_value = time_value.replace('-', '/').replace('止', '')
+            
+            formatted_time = '长期'
+            
+            try:
+                # 规则1: 包含"长期"
+                if '长期' in time_value:
+                    formatted_time = '长期'
+                # 规则2: X个月
+                elif '个月' in time_value:
+                    months_match = re.search(r'(\d+)个月', time_value)
+                    if months_match:
+                        months = int(months_match.group(1))
+                        future_date = date.today() + relativedelta(months=+months)
+                        year = future_date.year
+                        month = future_date.month
+                        last_day = calendar.monthrange(year, month)[1]
+                        formatted_time = f'{year}/{month:02d}/{last_day}'
+                # 规则3: 日期格式 20XX/XX/XX
+                elif time_value.startswith('20') and '/' in time_value:
+                    date_parts = time_value.split('/')[:3]
+                    if len(date_parts) >= 2:
+                        year = int(date_parts[0])
+                        month = int(date_parts[1])
+                        last_day = calendar.monthrange(year, month)[1]
+                        formatted_time = f'{year}/{month:02d}/{last_day}'
+                # 规则4: 其他情况默认"长期"
+                else:
+                    formatted_time = '长期'
+            except Exception as e:
+                logger.warning(f"时间格式化失败: {time_value}, 错误: {e}")
+                formatted_time = '长期'
+            
+            row[time_key] = formatted_time
+        
+        return data
 
     def _format_value(self, value: Any) -> Any:
         """格式化单元格值"""

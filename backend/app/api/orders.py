@@ -90,9 +90,9 @@ async def upload_excel(
         
         db.commit()
 
-        # 解析策略数据（使用第二次格式化的数据保存到 Policy 表）
+        # 解析策略数据（使用标准化后的英文字段名数据保存到 Policy 表）
         matcher = FirewallMatcher(db)
-        for row in excel_data['formatted_v2_data']:
+        for row in excel_data['data']:  # 改用 'data'，已经是英文字段名
             # 使用标准化后的英文字段名
             policy = Policy(
                 order_id=order.id,
@@ -155,7 +155,7 @@ def get_order(order_id: int, db: Session = Depends(get_db)):
     return order
 
 
-@router.get("/{order_id}/policies", response_model=List[PolicyResponse])
+@router.get("/{order_id}/policies")
 def get_order_policies(
     order_id: int, 
     version: str = None,
@@ -165,20 +165,22 @@ def get_order_policies(
     获取工单的所有策略
     
     version 参数：
-    - original: 用户上传的原始数据（只读）
-    - formatted_v1: 第一次格式化后的数据（只读）
-    - formatted_v2: 第二次格式化后的数据（只读，可编辑）
+    - original: 用户上传的原始数据（只读，中文字段名）
+    - formatted_v1: 第一次格式化后的数据（只读，中文字段名）
+    - formatted_v2: 第二次格式化后的数据（只读，中文字段名）
     - user_modified: 用户手动编辑后的数据（可编辑）
-    - 不传参数：返回 Policy 表中的当前策略（默认）
+    - 不传参数：返回 Policy 表中的当前策略（默认，英文字段名）
     
     特殊处理：
     - 如果请求 user_modified 但不存在，返回 Policy 表数据
+    - 版本数据返回原始字典（保持中文字段名）
+    - Policy 表数据返回 PolicyResponse 格式（英文字段名）
     """
     order = db.query(Order).filter(Order.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="工单不存在")
     
-    # 如果指定了版本，返回版本数据
+    # 如果指定了版本，返回版本数据（原始字典，保持中文字段名）
     if version:
         policy_version = db.query(PolicyVersion).filter(
             PolicyVersion.order_id == order_id,
@@ -193,24 +195,65 @@ def get_order_policies(
         if not policy_version:
             raise HTTPException(status_code=404, detail=f"版本 {version} 不存在")
         
-        # 返回版本数据（转换为 PolicyResponse 格式）
+        # 返回版本数据（原始字典，保持中文字段名）
         policies_data = policy_version.data.get('policies', [])
         result = []
         for idx, policy_dict in enumerate(policies_data):
-            # 为每条策略添加必填字段
+            # 为每条策略添加必填字段（用于前端兼容）
             policy_response = {
                 'id': idx + 1,  # 使用索引作为临时 ID（版本数据是只读的）
                 'order_id': order_id,
                 'is_merged': False,
                 'created_at': policy_version.created_at.isoformat() if policy_version.created_at else datetime.now().isoformat(),
-                **policy_dict  # 合并原始数据
+                **policy_dict  # 合并原始数据（保持中文字段名）
             }
             result.append(policy_response)
         return result
     
-    # 默认返回 Policy 表中的当前策略（可编辑）
+    # 默认返回 Policy 表中的当前策略（可编辑，转换为中文字段名）
     policies = db.query(Policy).filter(Policy.order_id == order_id).all()
-    return policies
+    
+    # 获取 formatted_v2 版本数据，用于补充"使用时间"字段
+    formatted_v2_version = db.query(PolicyVersion).filter(
+        PolicyVersion.order_id == order_id,
+        PolicyVersion.version_type == 'formatted_v2'
+    ).first()
+    
+    # 构建使用时间映射（通过行号匹配）
+    usage_time_map = {}
+    if formatted_v2_version:
+        formatted_v2_data = formatted_v2_version.data.get('policies', [])
+        for policy_dict in formatted_v2_data:
+            row_number = policy_dict.get('_row_number')
+            usage_time = policy_dict.get('使用时间', '')
+            if row_number:
+                usage_time_map[row_number] = usage_time
+    
+    # 将 Policy 对象转换为字典，并映射为中文字段名
+    result = []
+    for idx, policy in enumerate(policies):
+        # 尝试通过索引匹配使用时间（假设顺序一致）
+        usage_time = ''
+        if formatted_v2_version:
+            formatted_v2_data = formatted_v2_version.data.get('policies', [])
+            if idx < len(formatted_v2_data):
+                usage_time = formatted_v2_data[idx].get('使用时间', '')
+        
+        policy_dict = {
+            'id': policy.id,
+            'order_id': policy.order_id,
+            'is_merged': policy.is_merged,
+            'created_at': policy.created_at.isoformat() if policy.created_at else None,
+            '源端系统-环境-用途': policy.source_zone or '',
+            '源IP': policy.source_ip or '',
+            '目的端系统-环境-用途': policy.dest_zone or '',
+            '目的IP': policy.dest_ip or '',
+            '目的端口': policy.service or '',
+            '使用时间': usage_time,
+        }
+        result.append(policy_dict)
+    
+    return result
 
 
 @router.get("/{order_id}/versions")
