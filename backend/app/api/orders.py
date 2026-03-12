@@ -63,7 +63,8 @@ async def upload_excel(
         db.commit()
         db.refresh(order)
         
-        # 保存原始版本
+        # 保存4个版本
+        # 版本1：原始数据
         original_version = PolicyVersion(
             order_id=order.id,
             version_type='original',
@@ -71,35 +72,44 @@ async def upload_excel(
         )
         db.add(original_version)
         
-        # 保存格式化版本
-        formatted_version = PolicyVersion(
+        # 版本2：第一次格式化（标准化字段名 + 格式化IP/端口）
+        formatted_v1_version = PolicyVersion(
             order_id=order.id,
-            version_type='formatted',
-            data={'policies': excel_data['formatted_data']}
+            version_type='formatted_v1',
+            data={'policies': excel_data['formatted_v1_data']}
         )
-        db.add(formatted_version)
-        db.commit()
+        db.add(formatted_v1_version)
         
-        # 解析策略数据
+        # 版本3：第二次格式化（删除示例策略）
+        formatted_v2_version = PolicyVersion(
+            order_id=order.id,
+            version_type='formatted_v2',
+            data={'policies': excel_data['formatted_v2_data']}
+        )
+        db.add(formatted_v2_version)
+        
+        db.commit()
+
+        # 解析策略数据（使用第二次格式化的数据保存到 Policy 表）
         matcher = FirewallMatcher(db)
-        for row in excel_data['data']:
-            # 使用标准化后的字段名
+        for row in excel_data['formatted_v2_data']:
+            # 使用标准化后的英文字段名
             policy = Policy(
                 order_id=order.id,
-                source_zone=str(row.get('源区域', '')),
-                dest_zone=str(row.get('目的区域', '')),  # 注意：标准化后是"目的区域"
-                source_ip=str(row.get('源IP', '')),
-                dest_ip=str(row.get('目的IP', '')),  # 注意：标准化后是"目的IP"
-                service=str(row.get('目的端口', '')),  # 强制转换为字符串
-                action=str(row.get('动作', 'permit'))
+                source_zone=str(row.get('source_zone', '')),
+                dest_zone=str(row.get('dest_zone', '')),
+                source_ip=str(row.get('source_ip', '')),
+                dest_ip=str(row.get('dest_ip', '')),
+                service=str(row.get('service', '')),  # 强制转换为字符串
+                action=str(row.get('action', 'permit'))
             )
-            
+
             # 匹配防火墙
-            dest_ip = row.get('目的IP', '')  # 注意：标准化后是"目的IP"
+            dest_ip = row.get('dest_ip', '')
             if dest_ip:
                 # 使用 IPFormatter 提取第一个 IP 地址
                 first_ip = IPFormatter.extract_first_ip(dest_ip)
-                
+
                 # 只有当 IP 格式正确时才匹配防火墙
                 if first_ip and '.' in first_ip:
                     try:
@@ -108,12 +118,26 @@ async def upload_excel(
                     except Exception as e:
                         # 匹配失败不影响策略保存
                         pass
-            
+
             db.add(policy)
-        
+
         db.commit()
-        
-        return order
+
+        # 返回包含版本数据的响应
+        return {
+            "id": order.id,
+            "order_no": order.order_no,
+            "title": order.title,
+            "description": order.description,
+            "status": order.status,
+            "excel_file_path": order.excel_file_path,
+            "created_by": order.created_by,
+            "created_at": order.created_at,
+            "updated_at": order.updated_at,
+            "original_data": excel_data['original_data'],
+            "formatted_v1_data": excel_data['formatted_v1_data'],
+            "formatted_v2_data": excel_data['formatted_v2_data']
+        }
         
     except Exception as e:
         db.rollback()
@@ -142,12 +166,13 @@ def get_order_policies(
     
     version 参数：
     - original: 用户上传的原始数据（只读）
-    - formatted: 第一次自动格式化后的数据（只读）
+    - formatted_v1: 第一次格式化后的数据（只读）
+    - formatted_v2: 第二次格式化后的数据（只读，可编辑）
     - user_modified: 用户手动编辑后的数据（可编辑）
-    - 不传参数：返回当前策略（默认）
+    - 不传参数：返回 Policy 表中的当前策略（默认）
     
     特殊处理：
-    - 如果请求 user_modified 但不存在，返回 formatted 版本作为初始数据
+    - 如果请求 user_modified 但不存在，返回 Policy 表数据
     """
     order = db.query(Order).filter(Order.id == order_id).first()
     if not order:
@@ -160,20 +185,30 @@ def get_order_policies(
             PolicyVersion.version_type == version
         ).first()
         
-        # 特殊处理：如果请求 user_modified 但不存在，返回 formatted 版本
+        # 特殊处理：如果请求 user_modified 但不存在，返回 Policy 表数据
         if not policy_version and version == 'user_modified':
-            policy_version = db.query(PolicyVersion).filter(
-                PolicyVersion.order_id == order_id,
-                PolicyVersion.version_type == 'formatted'
-            ).first()
+            policies = db.query(Policy).filter(Policy.order_id == order_id).all()
+            return policies
         
         if not policy_version:
             raise HTTPException(status_code=404, detail=f"版本 {version} 不存在")
         
         # 返回版本数据（转换为 PolicyResponse 格式）
-        return policy_version.data.get('policies', [])
+        policies_data = policy_version.data.get('policies', [])
+        result = []
+        for idx, policy_dict in enumerate(policies_data):
+            # 为每条策略添加必填字段
+            policy_response = {
+                'id': idx + 1,  # 使用索引作为临时 ID（版本数据是只读的）
+                'order_id': order_id,
+                'is_merged': False,
+                'created_at': policy_version.created_at.isoformat() if policy_version.created_at else datetime.now().isoformat(),
+                **policy_dict  # 合并原始数据
+            }
+            result.append(policy_response)
+        return result
     
-    # 默认返回当前策略
+    # 默认返回 Policy 表中的当前策略（可编辑）
     policies = db.query(Policy).filter(Policy.order_id == order_id).all()
     return policies
 
