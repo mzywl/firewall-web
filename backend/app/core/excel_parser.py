@@ -95,33 +95,36 @@ class ExcelParser:
             # 3. 读取数据（从表头行之后开始）
             data = self._read_data(headers, header_row)
             logger.info(f"读取到 {len(data)} 行数据")
-            # 保存原始数据（用于版本追溯）
+            
+            # 移除空列
+            data, headers = self._remove_empty_columns(data, headers)
+            
+            # 保存原始数据（保留中文列头）
             original_data = [dict(row) for row in data]
 
-            # 4. 标准化字段名
-            data = self._normalize_field_names(data)
-            #移除空列
-            data ,headers= self._remove_empty_columns(data, headers)
-            # 5. 格式化 IP 地址
-            data = self._format_ip_addresses(data)
+            # 4. 第一次格式化：格式化 IP 地址（保留中文列头）
+            formatted_v1_data = self._format_ip_addresses([dict(row) for row in data])
+            logger.info(f"第一次格式化完成，共 {len(formatted_v1_data)} 行数据")
 
-            # 保存格式化后的数据（用于版本追溯）
-            formatted_data = [dict(row) for row in data]
+            # 5. 第二次格式化：删除示例策略（保留中文列头）
+            formatted_v2_data = self._remove_example_policies([dict(row) for row in formatted_v1_data])
+            logger.info(f"第二次格式化完成（删除示例策略），剩余 {len(formatted_v2_data)} 行数据")
 
-            # 6. 删除示例策略
-            data = self._remove_example_policies(data)
-            logger.info(f"过滤后剩余 {len(data)} 行数据")
+            # 6. 转换成英文字段名（用于保存到 Policy 表）
+            normalized_data = self._normalize_field_names([dict(row) for row in formatted_v2_data])
+            logger.info(f"字段名标准化完成")
 
             # 打印第一行数据用于调试
-            if data:
-                logger.info(f"第一行数据示例: {data[0]}")
+            if normalized_data:
+                logger.info(f"第一行数据示例: {normalized_data[0]}")
 
             return {
                 "headers": headers,
-                "data": data,
-                "original_data": original_data,
-                "formatted_data": formatted_data,
-                "total_rows": len(data),
+                "data": normalized_data,  # 用于保存到 Policy 表（英文字段名）
+                "original_data": original_data,  # 版本1：原始数据（中文列头）
+                "formatted_v1_data": formatted_v1_data,  # 版本2：第一次格式化（中文列头）
+                "formatted_v2_data": formatted_v2_data,  # 版本3：第二次格式化（中文列头）
+                "total_rows": len(normalized_data),
                 "header_row": header_row
             }
         except Exception as e:
@@ -267,16 +270,38 @@ class ExcelParser:
     def _format_ip_addresses(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         使用更精细的 IP / 端口格式化逻辑
+        支持中文列头和英文字段名
         """
         for row in data:
-            if 'source_ip' in row and row['source_ip']:
-                row['source_ip'] = IPFormatter.format_ip_list(row['source_ip'])
+            # 查找源IP字段（支持中文和英文）
+            source_ip_key = None
+            for key in row.keys():
+                if key in ['source_ip', '源IP', '源ip', '源地址', '源IP地址']:
+                    source_ip_key = key
+                    break
+            
+            if source_ip_key and row[source_ip_key]:
+                row[source_ip_key] = IPFormatter.format_ip_list(row[source_ip_key])
 
-            if 'dest_ip' in row and row['dest_ip']:
-                row['dest_ip'] = IPFormatter.format_ip_list(row['dest_ip'])
+            # 查找目的IP字段
+            dest_ip_key = None
+            for key in row.keys():
+                if key in ['dest_ip', '目的IP', '目的ip', '目标IP', '目的地址', '目的IP地址']:
+                    dest_ip_key = key
+                    break
+            
+            if dest_ip_key and row[dest_ip_key]:
+                row[dest_ip_key] = IPFormatter.format_ip_list(row[dest_ip_key])
 
-            if 'service' in row and row['service']:
-                row['service'] = PortFormatter.format_port_list(row['service'])
+            # 查找服务/端口字段
+            service_key = None
+            for key in row.keys():
+                if key in ['service', '目的端口', '目标端口', '端口', '服务端口', '服务']:
+                    service_key = key
+                    break
+            
+            if service_key and row[service_key]:
+                row[service_key] = PortFormatter.format_port_list(row[service_key])
 
         return data
 
@@ -284,15 +309,29 @@ class ExcelParser:
         """
         删除示例策略
         判断条件：如果同时满足以下条件，则认为是示例策略：
-        - "source_zone"（源端系统-环境-用途）包含 "示例"
-        - "dest_zone"（目的端系统-环境-用途）包含 "示例"
+        - 源区域字段包含 "示例"
+        - 目的区域字段包含 "示例"
+        支持中文列头和英文字段名
         """
         filtered_data = []
 
         for row in data:
-            # 使用标准化后的英文字段名
-            source_system = str(row.get("source_zone", ""))
-            dest_system = str(row.get("dest_zone", ""))
+            # 查找源区域字段
+            source_zone_key = None
+            for key in row.keys():
+                if key in ['source_zone', '源区域', '源安全域', '源端系统-环境-用途', '源端系统']:
+                    source_zone_key = key
+                    break
+            
+            # 查找目的区域字段
+            dest_zone_key = None
+            for key in row.keys():
+                if key in ['dest_zone', '目的区域', '目标区域', '目的安全域', '目的端系统-环境-用途', '目的端系统']:
+                    dest_zone_key = key
+                    break
+            
+            source_system = str(row.get(source_zone_key, "")) if source_zone_key else ""
+            dest_system = str(row.get(dest_zone_key, "")) if dest_zone_key else ""
 
             # 如果两个字段都包含"示例"，则跳过
             if "示例" in source_system and "示例" in dest_system:
