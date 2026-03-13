@@ -104,7 +104,7 @@ class FirewallBase(BaseModel):
     external_zone_name: Optional[str] = Field(None, max_length=100)
     
     # 连接方式
-    connection_type: ConnectionType = Field(default=ConnectionType.SSH)
+    connection_type: ConnectionType = Field(default=ConnectionType.ssh)
     connection_config: Optional[dict] = None
     
     # 防护范围（分内部和外部）
