@@ -32,7 +32,7 @@ def push_policies_task(self, order_id: int):
             raise Exception(f"工单 {order_id} 不存在")
         
         # 更新工单状态
-        order.status = OrderStatus.PROCESSING
+        order.status = OrderStatus.processing
         db.commit()
         
         # 广播状态变更
@@ -111,11 +111,11 @@ def push_policies_task(self, order_id: int):
         
         # 更新工单状态
         if failed_count == 0:
-            order.status = OrderStatus.COMPLETED
+            order.status = OrderStatus.completed
             final_status = 'completed'
             final_message = f'推送完成，成功 {success_count} 条'
         else:
-            order.status = OrderStatus.FAILED
+            order.status = OrderStatus.failed
             final_status = 'failed'
             final_message = f'推送完成，成功 {success_count} 条，失败 {failed_count} 条'
         
@@ -152,7 +152,7 @@ def push_policies_task(self, order_id: int):
         # 更新工单状态为失败
         order = db.query(Order).filter(Order.id == order_id).first()
         if order:
-            order.status = OrderStatus.FAILED
+            order.status = OrderStatus.failed
             db.commit()
         
         # 广播错误

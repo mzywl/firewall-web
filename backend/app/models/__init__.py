@@ -7,10 +7,10 @@ import enum
 
 class OrderStatus(str, enum.Enum):
     """工单状态"""
-    PENDING = "pending"  # 待处理
-    PROCESSING = "processing"  # 处理中
-    COMPLETED = "completed"  # 已完成
-    FAILED = "failed"  # 失败
+    pending = "pending"  # 待处理
+    processing = "processing"  # 处理中
+    completed = "completed"  # 已完成
+    failed = "failed"  # 失败
 
 
 class FirewallType(str, enum.Enum):
@@ -45,7 +45,7 @@ class Order(Base):
     title = Column(String(200), nullable=False, comment="工单标题")
     description = Column(Text, comment="工单描述")
     excel_file_path = Column(String(500), comment="Excel文件路径")
-    status = Column(Enum(OrderStatus), default=OrderStatus.PENDING, comment="工单状态")
+    status = Column(Enum(OrderStatus), default=OrderStatus.pending, comment="工单状态")
     created_by = Column(String(100), comment="创建人")
     created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment="更新时间")
@@ -106,7 +106,7 @@ class Firewall(Base):
     external_zone_name = Column(String(100), comment="外部防护区域名称")
     
     # 连接方式
-    connection_type = Column(Enum(ConnectionType), nullable=False, default=ConnectionType.SSH, comment="连接类型")
+    connection_type = Column(Enum(ConnectionType), nullable=False, default=ConnectionType.ssh, comment="连接类型")
     connection_config = Column(JSON, comment="连接配置(根据type存不同结构)")
     
     # 防护范围（分内部和外部）

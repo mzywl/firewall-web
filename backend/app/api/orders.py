@@ -55,7 +55,7 @@ async def upload_excel(
             title=title or file.filename,
             description=f"上传文件: {file.filename}, 共 {excel_data['total_rows']} 行数据",
             excel_file_path=file_path,
-            status=OrderStatus.PENDING,
+            status=OrderStatus.pending,
             created_by=created_by
         )
         

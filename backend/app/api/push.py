@@ -19,7 +19,7 @@ def start_push(order_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="工单不存在")
     
     # 检查工单状态
-    if order.status == OrderStatus.PROCESSING:
+    if order.status == OrderStatus.processing:
         raise HTTPException(status_code=400, detail="工单正在推送中")
     
     # 检查是否有待推送的策略

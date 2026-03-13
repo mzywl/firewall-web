@@ -6,10 +6,10 @@ from enum import Enum
 
 class OrderStatus(str, Enum):
     """工单状态"""
-    PENDING = "pending"
-    PROCESSING = "processing"
-    COMPLETED = "completed"
-    FAILED = "failed"
+    pending = "pending"
+    processing = "processing"
+    completed = "completed"
+    failed = "failed"
 
 
 class FirewallType(str, Enum):
