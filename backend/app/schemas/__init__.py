@@ -18,6 +18,18 @@ class FirewallType(str, Enum):
     HILLSTONE = "hillstone"
     LEADSEC = "leadsec"
     H3C = "h3c"
+    GUANQUN = "guanqun"
+    FEITA = "feita"
+    WANGSHEN = "wangshen"
+    OTHER = "other"
+
+
+class ConnectionType(str, Enum):
+    """连接方式"""
+    SSH = "ssh"
+    API = "api"
+    CLI = "cli"
+    MANUAL = "manual"
 
 
 # Order Schemas
@@ -78,24 +90,39 @@ class PolicyResponse(PolicyBase):
 
 # Firewall Schemas
 class FirewallBase(BaseModel):
-    name: str = Field(..., max_length=100)
+    name: str = Field(..., max_length=200)
+    alias: Optional[str] = Field(None, max_length=100)
     type: FirewallType
-    host: str = Field(..., max_length=100)
-    port: int = Field(default=22)
-    username: Optional[str] = None
+    management_ip: str = Field(..., max_length=50)
+    connection_type: ConnectionType = Field(default=ConnectionType.SSH)
+    connection_config: Optional[dict] = None
+    protected_ips: Optional[str] = None
+    supported_policy_types: Optional[List[str]] = None
+    auto_push: int = Field(default=1)
+    push_contact: Optional[str] = None
+    push_remark: Optional[str] = None
+    status: str = Field(default="enabled")
+    remark: Optional[str] = None
 
 
 class FirewallCreate(FirewallBase):
-    password: Optional[str] = None
-    config: Optional[dict] = None
+    pass
 
 
 class FirewallUpdate(BaseModel):
     name: Optional[str] = None
-    host: Optional[str] = None
-    port: Optional[int] = None
-    username: Optional[str] = None
-    password: Optional[str] = None
+    alias: Optional[str] = None
+    type: Optional[FirewallType] = None
+    management_ip: Optional[str] = None
+    connection_type: Optional[ConnectionType] = None
+    connection_config: Optional[dict] = None
+    protected_ips: Optional[str] = None
+    supported_policy_types: Optional[List[str]] = None
+    auto_push: Optional[int] = None
+    push_contact: Optional[str] = None
+    push_remark: Optional[str] = None
+    status: Optional[str] = None
+    remark: Optional[str] = None
     is_active: Optional[int] = None
 
 
@@ -103,6 +130,7 @@ class FirewallResponse(FirewallBase):
     id: int
     is_active: int
     created_at: datetime
+    updated_at: datetime
 
     class Config:
         from_attributes = True

@@ -19,6 +19,18 @@ class FirewallType(str, enum.Enum):
     HILLSTONE = "hillstone"
     LEADSEC = "leadsec"
     H3C = "h3c"
+    GUANQUN = "guanqun"  # 冠群
+    FEITA = "feita"  # 飞塔
+    WANGSHEN = "wangshen"  # 网神
+    OTHER = "other"  # 其他
+
+
+class ConnectionType(str, enum.Enum):
+    """连接方式"""
+    SSH = "ssh"
+    API = "api"
+    CLI = "cli"
+    MANUAL = "manual"
 
 
 class Order(Base):
@@ -78,15 +90,29 @@ class Firewall(Base):
     __tablename__ = "firewalls"
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String(100), nullable=False, comment="防火墙名称")
-    type = Column(Enum(FirewallType), nullable=False, comment="防火墙类型")
-    host = Column(String(100), nullable=False, comment="主机地址")
-    port = Column(Integer, default=22, comment="SSH端口")
-    username = Column(String(100), comment="用户名")
-    password = Column(String(200), comment="密码(加密存储)")
     
-    # 防火墙特定配置
-    config = Column(JSON, comment="其他配置(JSON格式)")
+    # 基础信息
+    name = Column(String(200), nullable=False, comment="防火墙名称")
+    alias = Column(String(100), comment="简称/别名")
+    type = Column(Enum(FirewallType), nullable=False, comment="防火墙类型")
+    management_ip = Column(String(50), nullable=False, comment="管理IP")
+    
+    # 连接方式
+    connection_type = Column(Enum(ConnectionType), nullable=False, default=ConnectionType.SSH, comment="连接类型")
+    connection_config = Column(JSON, comment="连接配置(根据type存不同结构)")
+    
+    # 防护范围
+    protected_ips = Column(Text, comment="防护IP段，每行一个")
+    supported_policy_types = Column(JSON, comment="支持的策略类型数组")
+    
+    # 推送配置
+    auto_push = Column(Integer, default=1, comment="是否支持自动推送(0:否, 1:是)")
+    push_contact = Column(String(100), comment="推送责任人")
+    push_remark = Column(Text, comment="推送备注")
+    
+    # 状态和备注
+    status = Column(String(20), default="enabled", comment="状态(enabled/disabled)")
+    remark = Column(Text, comment="备注")
     
     is_active = Column(Integer, default=1, comment="是否启用(0:否, 1:是)")
     created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")

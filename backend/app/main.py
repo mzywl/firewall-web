@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api import orders, push
+from app.api import orders, push, firewalls
 from app.core.websocket import mount_socketio
 
 app = FastAPI(
@@ -24,6 +24,7 @@ mount_socketio(app)
 # 注册路由
 app.include_router(orders.router)
 app.include_router(push.router)
+app.include_router(firewalls.router)
 
 
 @app.get("/")

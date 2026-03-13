@@ -6,6 +6,8 @@ import { Upload } from './pages/Upload';
 import { Edit } from './pages/Edit';
 import { Preview } from './pages/Preview';
 import { Push } from './pages/Push';
+import FirewallManagement from './pages/FirewallManagement';
+import FirewallForm from './pages/FirewallForm';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -27,6 +29,9 @@ function App() {
             <Route path="/order/:orderId/edit" element={<Edit />} />
             <Route path="/order/:orderId/preview" element={<Preview />} />
             <Route path="/order/:orderId/push" element={<Push />} />
+            <Route path="/firewalls" element={<FirewallManagement />} />
+            <Route path="/firewalls/new" element={<FirewallForm />} />
+            <Route path="/firewalls/:id/edit" element={<FirewallForm />} />
           </Routes>
         </Layout>
       </BrowserRouter>
