@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from typing import Optional, List
 from datetime import datetime
 from enum import Enum
@@ -124,6 +124,18 @@ class FirewallBase(BaseModel):
     push_remark: Optional[str] = None
     status: str = Field(default="enabled")
     remark: Optional[str] = None
+    
+    @validator('type', pre=True)
+    def lowercase_type(cls, v):
+        if isinstance(v, str):
+            return v.lower()
+        return v
+    
+    @validator('connection_type', pre=True)
+    def lowercase_connection_type(cls, v):
+        if isinstance(v, str):
+            return v.lower()
+        return v
 
 
 class FirewallCreate(FirewallBase):
