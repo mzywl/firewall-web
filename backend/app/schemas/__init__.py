@@ -14,25 +14,25 @@ class OrderStatus(str, Enum):
 
 class FirewallType(str, Enum):
     """防火墙类型"""
-    FORTIGATE = "fortigate"
-    HILLSTONE = "hillstone"
-    LEADSEC = "leadsec"
-    H3C = "h3c"
-    GUANQUN = "guanqun"
-    FEITA = "feita"
-    WANGSHEN = "wangshen"
-    SANGFOR = "sangfor"
-    HUAWEI = "huawei"
-    SHANSHI = "shanshi"
-    OTHER = "other"
+    fortigate = "fortigate"
+    hillstone = "hillstone"
+    leadsec = "leadsec"
+    h3c = "h3c"
+    guanqun = "guanqun"
+    feita = "feita"
+    wangshen = "wangshen"
+    sangfor = "sangfor"
+    huawei = "huawei"
+    shanshi = "shanshi"
+    other = "other"
 
 
 class ConnectionType(str, Enum):
     """连接方式"""
-    SSH = "ssh"
-    API = "api"
-    CLI = "cli"
-    MANUAL = "manual"
+    ssh = "ssh"
+    api = "api"
+    cli = "cli"
+    manual = "manual"
 
 
 # Order Schemas

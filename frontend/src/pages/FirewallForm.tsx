@@ -123,6 +123,10 @@ export default function FirewallForm() {
         connection_type: formData.connection_type.toLowerCase()
       };
       
+      console.log('=== 提交数据 ===', submitData);
+      console.log('type:', submitData.type);
+      console.log('connection_type:', submitData.connection_type);
+      
       if (isEdit) {
         await axios.put(`${API_BASE_URL}/firewalls/${id}`, submitData);
         alert('更新成功');
