@@ -22,6 +22,9 @@ class FirewallType(str, enum.Enum):
     GUANQUN = "guanqun"  # 冠群
     FEITA = "feita"  # 飞塔
     WANGSHEN = "wangshen"  # 网神
+    SANGFOR = "sangfor"  # 深信服
+    HUAWEI = "huawei"  # 华为
+    SHANSHI = "shanshi"  # 山石
     OTHER = "other"  # 其他
 
 

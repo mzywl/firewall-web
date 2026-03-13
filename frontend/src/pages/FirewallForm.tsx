@@ -291,12 +291,15 @@ export default function FirewallForm() {
                 value={formData.type}
                 onChange={(e) => setFormData({ ...formData, type: e.target.value })}
               >
-                <option value="guanqun">冠群</option>
                 <option value="h3c">H3C</option>
+                <option value="huawei">华为</option>
+                <option value="sangfor">深信服</option>
+                <option value="shanshi">山石</option>
+                <option value="guanqun">冠群</option>
                 <option value="feita">飞塔</option>
                 <option value="wangshen">网神</option>
                 <option value="fortigate">Fortigate</option>
-                <option value="hillstone">山石</option>
+                <option value="hillstone">Hillstone</option>
                 <option value="leadsec">绿盟</option>
                 <option value="other">其他</option>
               </select>

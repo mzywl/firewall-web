@@ -75,12 +75,15 @@ export default function FirewallManagement() {
 
   const getTypeLabel = (type: string) => {
     const typeMap: Record<string, string> = {
-      'guanqun': '冠群',
       'h3c': 'H3C',
+      'huawei': '华为',
+      'sangfor': '深信服',
+      'shanshi': '山石',
+      'guanqun': '冠群',
       'feita': '飞塔',
       'wangshen': '网神',
       'fortigate': 'Fortigate',
-      'hillstone': '山石',
+      'hillstone': 'Hillstone',
       'leadsec': '绿盟',
       'other': '其他'
     };
@@ -129,12 +132,15 @@ export default function FirewallManagement() {
             onChange={(e) => setFilterType(e.target.value)}
           >
             <option value="">全部类型</option>
-            <option value="guanqun">冠群</option>
             <option value="h3c">H3C</option>
+            <option value="huawei">华为</option>
+            <option value="sangfor">深信服</option>
+            <option value="shanshi">山石</option>
+            <option value="guanqun">冠群</option>
             <option value="feita">飞塔</option>
             <option value="wangshen">网神</option>
             <option value="fortigate">Fortigate</option>
-            <option value="hillstone">山石</option>
+            <option value="hillstone">Hillstone</option>
             <option value="leadsec">绿盟</option>
             <option value="other">其他</option>
           </select>
