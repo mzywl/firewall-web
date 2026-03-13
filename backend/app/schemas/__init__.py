@@ -97,10 +97,28 @@ class FirewallBase(BaseModel):
     alias: Optional[str] = Field(None, max_length=100)
     type: FirewallType
     management_ip: str = Field(..., max_length=50)
+    
+    # 区域信息
+    region: Optional[str] = Field(None, max_length=100)
+    local_zone_name: Optional[str] = Field(None, max_length=100)
+    external_zone_name: Optional[str] = Field(None, max_length=100)
+    
+    # 连接方式
     connection_type: ConnectionType = Field(default=ConnectionType.SSH)
     connection_config: Optional[dict] = None
-    protected_ips: Optional[str] = None
+    
+    # 防护范围（分内部和外部）
+    internal_protected_ips: Optional[str] = None
+    external_protected_ips: Optional[str] = None
     supported_policy_types: Optional[List[str]] = None
+    
+    # NAT配置
+    outbound_snat_pool: Optional[str] = None
+    inbound_dnat_pool: Optional[str] = None
+    inbound_snat_pool: Optional[str] = None
+    outbound_dnat_pool: Optional[str] = None
+    
+    # 推送配置
     auto_push: int = Field(default=1)
     push_contact: Optional[str] = None
     push_remark: Optional[str] = None
@@ -117,10 +135,23 @@ class FirewallUpdate(BaseModel):
     alias: Optional[str] = None
     type: Optional[FirewallType] = None
     management_ip: Optional[str] = None
+    
+    region: Optional[str] = None
+    local_zone_name: Optional[str] = None
+    external_zone_name: Optional[str] = None
+    
     connection_type: Optional[ConnectionType] = None
     connection_config: Optional[dict] = None
-    protected_ips: Optional[str] = None
+    
+    internal_protected_ips: Optional[str] = None
+    external_protected_ips: Optional[str] = None
     supported_policy_types: Optional[List[str]] = None
+    
+    outbound_snat_pool: Optional[str] = None
+    inbound_dnat_pool: Optional[str] = None
+    inbound_snat_pool: Optional[str] = None
+    outbound_dnat_pool: Optional[str] = None
+    
     auto_push: Optional[int] = None
     push_contact: Optional[str] = None
     push_remark: Optional[str] = None

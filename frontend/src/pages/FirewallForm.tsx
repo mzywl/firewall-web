@@ -25,10 +25,28 @@ interface FormData {
   alias: string;
   type: string;
   management_ip: string;
+  
+  // 区域信息
+  region: string;
+  local_zone_name: string;
+  external_zone_name: string;
+  
+  // 连接方式
   connection_type: string;
   connection_config: ConnectionConfig;
-  protected_ips: string;
+  
+  // 防护范围（分内部和外部）
+  internal_protected_ips: string;
+  external_protected_ips: string;
   supported_policy_types: string[];
+  
+  // NAT配置
+  outbound_snat_pool: string;
+  inbound_dnat_pool: string;
+  inbound_snat_pool: string;
+  outbound_dnat_pool: string;
+  
+  // 推送配置
   auto_push: number;
   push_contact: string;
   push_remark: string;
@@ -46,10 +64,23 @@ export default function FirewallForm() {
     alias: '',
     type: 'h3c',
     management_ip: '',
+    
+    region: '',
+    local_zone_name: '',
+    external_zone_name: '',
+    
     connection_type: 'ssh',
     connection_config: {},
-    protected_ips: '',
+    
+    internal_protected_ips: '',
+    external_protected_ips: '',
     supported_policy_types: [],
+    
+    outbound_snat_pool: '',
+    inbound_dnat_pool: '',
+    inbound_snat_pool: '',
+    outbound_dnat_pool: '',
+    
     auto_push: 1,
     push_contact: '',
     push_remark: '',
@@ -183,7 +214,29 @@ export default function FirewallForm() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium mb-1">Token</label>
+              <label className="block text-sm font-medium mb-1">用户名</label>
+              <Input
+                value={formData.connection_config.username || ''}
+                onChange={(e) => setFormData({
+                  ...formData,
+                  connection_config: { ...formData.connection_config, username: e.target.value }
+                })}
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1">密码</label>
+              <Input
+                type="password"
+                value={formData.connection_config.password || ''}
+                onChange={(e) => setFormData({
+                  ...formData,
+                  connection_config: { ...formData.connection_config, password: e.target.value }
+                })}
+                placeholder={isEdit ? '留空表示不修改' : ''}
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1">Token（可选）</label>
               <Input
                 type="password"
                 value={formData.connection_config.token || ''}
@@ -197,14 +250,14 @@ export default function FirewallForm() {
               <label className="block text-sm font-medium mb-1">认证方式</label>
               <select
                 className="w-full px-3 py-2 border rounded-md"
-                value={formData.connection_config.auth_type || 'bearer'}
+                value={formData.connection_config.auth_type || 'basic'}
                 onChange={(e) => setFormData({
                   ...formData,
                   connection_config: { ...formData.connection_config, auth_type: e.target.value }
                 })}
               >
+                <option value="basic">Basic Auth（账号密码）</option>
                 <option value="bearer">Bearer Token</option>
-                <option value="basic">Basic Auth</option>
                 <option value="apikey">API Key</option>
               </select>
             </div>
@@ -353,19 +406,62 @@ export default function FirewallForm() {
         </Card>
 
         <Card className="p-6 mb-6">
+          <h2 className="text-xl font-semibold mb-4">区域信息</h2>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+              <label className="block text-sm font-medium mb-1">所属区域</label>
+              <Input
+                value={formData.region}
+                onChange={(e) => setFormData({ ...formData, region: e.target.value })}
+                placeholder="如: 小营数据中心"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1">本地防护区域名称</label>
+              <Input
+                value={formData.local_zone_name}
+                onChange={(e) => setFormData({ ...formData, local_zone_name: e.target.value })}
+                placeholder="如: 服务器区"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1">外部防护区域名称</label>
+              <Input
+                value={formData.external_zone_name}
+                onChange={(e) => setFormData({ ...formData, external_zone_name: e.target.value })}
+                placeholder="如: 互联网区"
+              />
+            </div>
+          </div>
+        </Card>
+
+        <Card className="p-6 mb-6">
           <h2 className="text-xl font-semibold mb-4">防护范围</h2>
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium mb-1">防护IP段</label>
+              <label className="block text-sm font-medium mb-1">内部防护IP段</label>
               <textarea
                 className="w-full px-3 py-2 border rounded-md font-mono text-sm"
-                rows={8}
-                value={formData.protected_ips}
-                onChange={(e) => setFormData({ ...formData, protected_ips: e.target.value })}
+                rows={6}
+                value={formData.internal_protected_ips}
+                onChange={(e) => setFormData({ ...formData, internal_protected_ips: e.target.value })}
                 placeholder="每行一个IP段，如:&#10;10.5.81.0/24&#10;10.5.82.0/24&#10;10.5.83.0/24"
               />
               <p className="text-xs text-gray-500 mt-1">
-                支持批量粘贴，每行一个IP段
+                内部网络IP段，用于匹配策略源IP
+              </p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1">外部防护IP段</label>
+              <textarea
+                className="w-full px-3 py-2 border rounded-md font-mono text-sm"
+                rows={6}
+                value={formData.external_protected_ips}
+                onChange={(e) => setFormData({ ...formData, external_protected_ips: e.target.value })}
+                placeholder="每行一个IP段，如:&#10;10.247.0.0/24&#10;10.247.1.0/24"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                外部网络IP段，用于匹配策略目的IP
               </p>
             </div>
             <div>
@@ -383,6 +479,52 @@ export default function FirewallForm() {
                   </label>
                 ))}
               </div>
+            </div>
+          </div>
+        </Card>
+
+        <Card className="p-6 mb-6">
+          <h2 className="text-xl font-semibold mb-4">NAT配置</h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium mb-1">出向SNAT地址段/地址池</label>
+              <textarea
+                className="w-full px-3 py-2 border rounded-md font-mono text-sm"
+                rows={3}
+                value={formData.outbound_snat_pool}
+                onChange={(e) => setFormData({ ...formData, outbound_snat_pool: e.target.value })}
+                placeholder="地址段或地址池名称，如:&#10;10.5.1.1-10.5.1.10&#10;或: SNAT_POOL_1"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1">入向DNAT地址段/地址池</label>
+              <textarea
+                className="w-full px-3 py-2 border rounded-md font-mono text-sm"
+                rows={3}
+                value={formData.inbound_dnat_pool}
+                onChange={(e) => setFormData({ ...formData, inbound_dnat_pool: e.target.value })}
+                placeholder="地址段或地址池名称"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1">入向SNAT地址段/地址池</label>
+              <textarea
+                className="w-full px-3 py-2 border rounded-md font-mono text-sm"
+                rows={3}
+                value={formData.inbound_snat_pool}
+                onChange={(e) => setFormData({ ...formData, inbound_snat_pool: e.target.value })}
+                placeholder="地址段或地址池名称"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1">出向DNAT地址段/地址池</label>
+              <textarea
+                className="w-full px-3 py-2 border rounded-md font-mono text-sm"
+                rows={3}
+                value={formData.outbound_dnat_pool}
+                onChange={(e) => setFormData({ ...formData, outbound_dnat_pool: e.target.value })}
+                placeholder="地址段或地址池名称"
+              />
             </div>
           </div>
         </Card>

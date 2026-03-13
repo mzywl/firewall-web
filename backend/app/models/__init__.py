@@ -100,13 +100,25 @@ class Firewall(Base):
     type = Column(Enum(FirewallType), nullable=False, comment="防火墙类型")
     management_ip = Column(String(50), nullable=False, comment="管理IP")
     
+    # 区域信息
+    region = Column(String(100), comment="所属区域")
+    local_zone_name = Column(String(100), comment="本地防护区域名称")
+    external_zone_name = Column(String(100), comment="外部防护区域名称")
+    
     # 连接方式
     connection_type = Column(Enum(ConnectionType), nullable=False, default=ConnectionType.SSH, comment="连接类型")
     connection_config = Column(JSON, comment="连接配置(根据type存不同结构)")
     
-    # 防护范围
-    protected_ips = Column(Text, comment="防护IP段，每行一个")
+    # 防护范围（分内部和外部）
+    internal_protected_ips = Column(Text, comment="内部防护IP段，每行一个")
+    external_protected_ips = Column(Text, comment="外部防护IP段，每行一个")
     supported_policy_types = Column(JSON, comment="支持的策略类型数组")
+    
+    # NAT配置
+    outbound_snat_pool = Column(Text, comment="出向SNAT地址段/地址池名称")
+    inbound_dnat_pool = Column(Text, comment="入向DNAT地址段/地址池名称")
+    inbound_snat_pool = Column(Text, comment="入向SNAT地址段/地址池名称")
+    outbound_dnat_pool = Column(Text, comment="出向DNAT地址段/地址池名称")
     
     # 推送配置
     auto_push = Column(Integer, default=1, comment="是否支持自动推送(0:否, 1:是)")
