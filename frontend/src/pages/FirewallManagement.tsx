@@ -65,16 +65,6 @@ export default function FirewallManagement() {
     }
   };
 
-  const handleTestConnection = async (id: number) => {
-    try {
-      const response = await axios.post(`${API_BASE_URL}/firewalls/${id}/test-connection`);
-      alert(response.data.message);
-    } catch (error) {
-      console.error('连接测试失败:', error);
-      alert('连接测试失败');
-    }
-  };
-
   const filteredFirewalls = firewalls.filter(fw => {
     const matchSearch = !searchTerm || 
       fw.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -111,14 +101,9 @@ export default function FirewallManagement() {
     <div className="container mx-auto p-6">
       <div className="flex justify-between items-center mb-6">
         <h1 className="text-3xl font-bold">防火墙管理</h1>
-        <div className="flex gap-2">
-          <Button onClick={() => navigate('/firewalls/import')}>
-            从Excel导入
-          </Button>
-          <Button onClick={() => navigate('/firewalls/new')}>
-            新增防火墙
-          </Button>
-        </div>
+        <Button onClick={() => navigate('/firewalls/new')}>
+          新增防火墙
+        </Button>
       </div>
 
       {/* 搜索和筛选 */}
@@ -214,13 +199,6 @@ export default function FirewallManagement() {
                 </div>
 
                 <div className="flex gap-2 ml-4">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => handleTestConnection(fw.id)}
-                  >
-                    测试连接
-                  </Button>
                   <Button
                     size="sm"
                     variant="outline"

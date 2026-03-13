@@ -122,35 +122,3 @@ def delete_firewall(firewall_id: int, db: Session = Depends(get_db)):
     db.delete(db_firewall)
     db.commit()
     return None
-
-
-@router.post("/{firewall_id}/test-connection")
-def test_connection(firewall_id: int, db: Session = Depends(get_db)):
-    """测试防火墙连接"""
-    firewall = db.query(Firewall).filter(Firewall.id == firewall_id).first()
-    if not firewall:
-        raise HTTPException(status_code=404, detail="防火墙不存在")
-    
-    # TODO: 实现实际的连接测试逻辑
-    # 根据 connection_type 执行不同的测试
-    
-    return {
-        "success": True,
-        "message": "连接测试成功（模拟）",
-        "firewall_id": firewall_id,
-        "connection_type": firewall.connection_type
-    }
-
-
-@router.post("/import-excel")
-def import_from_excel(file_path: str, db: Session = Depends(get_db)):
-    """从Excel导入防火墙配置"""
-    # TODO: 实现Excel导入逻辑
-    # 读取 /home/lishiyu/qhec9-ez5fr/lishiyu/IP防护地址段.xlsx
-    # 解析并批量创建防火墙记录
-    
-    return {
-        "success": True,
-        "message": "导入功能待实现",
-        "imported_count": 0
-    }
