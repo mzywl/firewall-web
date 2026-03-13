@@ -7,7 +7,7 @@ Create Date: 2026-03-13
 """
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects import mysql
+from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision = '005_update_firewall'
@@ -17,24 +17,33 @@ depends_on = None
 
 
 def upgrade():
-    # 添加新的枚举值到 FirewallType
-    op.execute("ALTER TABLE firewalls MODIFY COLUMN type ENUM('fortigate','hillstone','leadsec','h3c','guanqun','feita','wangshen','other') NOT NULL")
+    # 创建新的枚举类型
+    op.execute("CREATE TYPE firewalltype_new AS ENUM('fortigate','hillstone','leadsec','h3c','guanqun','feita','wangshen','other')")
+    op.execute("CREATE TYPE connectiontype AS ENUM('ssh','api','cli','manual')")
     
-    # 重命名和修改列
-    op.alter_column('firewalls', 'host', new_column_name='management_ip', existing_type=sa.String(100))
+    # 重命名列
+    op.alter_column('firewalls', 'host', new_column_name='management_ip')
+    
+    # 修改列类型
     op.alter_column('firewalls', 'name', type_=sa.String(200), existing_type=sa.String(100))
+    op.alter_column('firewalls', 'management_ip', type_=sa.String(50), existing_type=sa.String(100))
     
     # 添加新列
     op.add_column('firewalls', sa.Column('alias', sa.String(100), nullable=True, comment='简称/别名'))
-    op.add_column('firewalls', sa.Column('connection_type', sa.Enum('ssh', 'api', 'cli', 'manual', name='connectiontype'), nullable=False, server_default='ssh', comment='连接类型'))
-    op.add_column('firewalls', sa.Column('connection_config', sa.JSON, nullable=True, comment='连接配置'))
+    op.add_column('firewalls', sa.Column('connection_type', postgresql.ENUM('ssh', 'api', 'cli', 'manual', name='connectiontype'), nullable=False, server_default='ssh', comment='连接类型'))
+    op.add_column('firewalls', sa.Column('connection_config', postgresql.JSON, nullable=True, comment='连接配置'))
     op.add_column('firewalls', sa.Column('protected_ips', sa.Text, nullable=True, comment='防护IP段'))
-    op.add_column('firewalls', sa.Column('supported_policy_types', sa.JSON, nullable=True, comment='支持的策略类型'))
+    op.add_column('firewalls', sa.Column('supported_policy_types', postgresql.JSON, nullable=True, comment='支持的策略类型'))
     op.add_column('firewalls', sa.Column('auto_push', sa.Integer, nullable=False, server_default='1', comment='是否支持自动推送'))
     op.add_column('firewalls', sa.Column('push_contact', sa.String(100), nullable=True, comment='推送责任人'))
     op.add_column('firewalls', sa.Column('push_remark', sa.Text, nullable=True, comment='推送备注'))
     op.add_column('firewalls', sa.Column('status', sa.String(20), nullable=False, server_default='enabled', comment='状态'))
     op.add_column('firewalls', sa.Column('remark', sa.Text, nullable=True, comment='备注'))
+    
+    # 更新 type 列的枚举类型
+    op.execute("ALTER TABLE firewalls ALTER COLUMN type TYPE firewalltype_new USING type::text::firewalltype_new")
+    op.execute("DROP TYPE firewalltype")
+    op.execute("ALTER TYPE firewalltype_new RENAME TO firewalltype")
     
     # 删除旧列
     op.drop_column('firewalls', 'port')
@@ -48,7 +57,7 @@ def downgrade():
     op.add_column('firewalls', sa.Column('port', sa.Integer, server_default='22'))
     op.add_column('firewalls', sa.Column('username', sa.String(100)))
     op.add_column('firewalls', sa.Column('password', sa.String(200)))
-    op.add_column('firewalls', sa.Column('config', sa.JSON))
+    op.add_column('firewalls', sa.Column('config', postgresql.JSON))
     
     # 删除新列
     op.drop_column('firewalls', 'remark')
@@ -65,6 +74,11 @@ def downgrade():
     # 恢复列名
     op.alter_column('firewalls', 'management_ip', new_column_name='host')
     op.alter_column('firewalls', 'name', type_=sa.String(100))
+    op.alter_column('firewalls', 'host', type_=sa.String(100))
     
     # 恢复枚举
-    op.execute("ALTER TABLE firewalls MODIFY COLUMN type ENUM('fortigate','hillstone','leadsec','h3c') NOT NULL")
+    op.execute("CREATE TYPE firewalltype_old AS ENUM('fortigate','hillstone','leadsec','h3c')")
+    op.execute("ALTER TABLE firewalls ALTER COLUMN type TYPE firewalltype_old USING type::text::firewalltype_old")
+    op.execute("DROP TYPE firewalltype")
+    op.execute("ALTER TYPE firewalltype_old RENAME TO firewalltype")
+    op.execute("DROP TYPE connectiontype")
