@@ -116,11 +116,18 @@ export default function FirewallForm() {
     setLoading(true);
 
     try {
+      // 转换枚举值为小写
+      const submitData = {
+        ...formData,
+        type: formData.type.toLowerCase(),
+        connection_type: formData.connection_type.toLowerCase()
+      };
+      
       if (isEdit) {
-        await axios.put(`${API_BASE_URL}/firewalls/${id}`, formData);
+        await axios.put(`${API_BASE_URL}/firewalls/${id}`, submitData);
         alert('更新成功');
       } else {
-        await axios.post(`${API_BASE_URL}/firewalls`, formData);
+        await axios.post(`${API_BASE_URL}/firewalls`, submitData);
         alert('创建成功');
       }
       navigate('/firewalls');
