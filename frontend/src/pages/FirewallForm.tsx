@@ -48,6 +48,7 @@ interface FormData {
   
   // 推送配置
   auto_push: number;
+  allow_same_firewall_push: number;
   push_contact: string;
   push_remark: string;
   status: string;
@@ -82,6 +83,7 @@ export default function FirewallForm() {
     outbound_dnat_pool: '',
     
     auto_push: 1,
+    allow_same_firewall_push: 0,
     push_contact: '',
     push_remark: '',
     status: 'enabled',
@@ -552,6 +554,17 @@ export default function FirewallForm() {
                   className="w-4 h-4"
                 />
                 <span className="text-sm font-medium">支持自动推送</span>
+              </label>
+            </div>
+            <div>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={formData.allow_same_firewall_push === 1}
+                  onChange={(e) => setFormData({ ...formData, allow_same_firewall_push: e.target.checked ? 1 : 0 })}
+                  className="w-4 h-4"
+                />
+                <span className="text-sm font-medium">同墙推送（源目的IP都在内部IP段时是否推送）</span>
               </label>
             </div>
             <div>

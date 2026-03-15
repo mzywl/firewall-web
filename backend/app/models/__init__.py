@@ -122,6 +122,7 @@ class Firewall(Base):
     
     # 推送配置
     auto_push = Column(Integer, default=1, comment="是否支持自动推送(0:否, 1:是)")
+    allow_same_firewall_push = Column(Integer, default=0, comment="是否允许同墙推送（源目的IP都在内部IP段时）(0:否, 1:是)")
     push_contact = Column(String(100), comment="推送责任人")
     push_remark = Column(Text, comment="推送备注")
     
