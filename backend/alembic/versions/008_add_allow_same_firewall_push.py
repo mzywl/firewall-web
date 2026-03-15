@@ -1,7 +1,7 @@
 """add allow_same_firewall_push to firewalls
 
-Revision ID: 008
-Revises: 007
+Revision ID: 008_add_allow_same_firewall_push
+Revises: 007_add_region_zone_nat
 Create Date: 2026-03-14 14:45:00
 
 """
@@ -10,8 +10,8 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision = '008'
-down_revision = '007'
+revision = '008_add_allow_same_firewall_push'
+down_revision = '007_add_region_zone_nat'
 branch_labels = None
 depends_on = None
 

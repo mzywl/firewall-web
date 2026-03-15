@@ -81,12 +81,11 @@ def get_preview_data(order_id: int, db: Session = Depends(get_db)):
         # 遍历所有匹配的防火墙
         for match in matched_firewalls:
             firewall = match['firewall']
-            source_match = match['source_match']
-            dest_match = match['dest_match']
+            direction = match['direction']
             
             # 判断是否应该推送（同墙策略检查）
             should_push, not_push_reason = matcher.should_push_same_firewall_policy(
-                firewall, source_match, dest_match
+                firewall, direction
             )
             
             if not should_push:
@@ -165,8 +164,8 @@ def get_preview_data(order_id: int, db: Session = Depends(get_db)):
             "status": order.status,
             "created_at": order.created_at.isoformat() if order.created_at else None
         },
-        "firewalls": firewalls_list,
-        "not_pushed_policies": not_pushed_policies,
+        "firewall_groups": firewalls_list,
+        "unmatched_policies": not_pushed_policies,
         "warnings": warnings,
         "errors": errors
     }

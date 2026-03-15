@@ -36,11 +36,19 @@ class FirewallMatcher:
         """
         根据策略的源IP和目的IP匹配所有相关防火墙
         
+        匹配规则：
+        1. 出向：源IP在内部区域 且 目的IP在外部区域
+        2. 入向：源IP在外部区域 且 目的IP在内部区域
+        3. 同墙：源IP和目的IP都在内部区域
+        
         返回: [
             {
                 'firewall': Firewall对象,
-                'source_match': bool,  # 源IP是否匹配
-                'dest_match': bool     # 目的IP是否匹配
+                'direction': 'outbound' | 'inbound' | 'same_firewall',
+                'source_in_internal': bool,
+                'source_in_external': bool,
+                'dest_in_internal': bool,
+                'dest_in_external': bool
             }
         ]
         """
@@ -69,23 +77,43 @@ class FirewallMatcher:
             ).all()
             
             for firewall in firewalls:
-                source_match = False
-                dest_match = False
+                source_in_internal = False
+                source_in_external = False
+                dest_in_internal = False
+                dest_in_external = False
                 
-                # 检查源IP是否在内部防护IP段
+                # 检查源IP
                 if source_ip_obj:
-                    source_match = self._ip_in_internal_range(source_ip_obj, firewall)
+                    source_in_internal = self._ip_in_internal_range(source_ip_obj, firewall)
+                    source_in_external = self._ip_in_external_range(source_ip_obj, firewall)
                 
-                # 检查目的IP是否在内部防护IP段
+                # 检查目的IP
                 if dest_ip_obj:
-                    dest_match = self._ip_in_internal_range(dest_ip_obj, firewall)
+                    dest_in_internal = self._ip_in_internal_range(dest_ip_obj, firewall)
+                    dest_in_external = self._ip_in_external_range(dest_ip_obj, firewall)
                 
-                # 只要源或目的有一个匹配，就加入结果
-                if source_match or dest_match:
+                # 判断流量方向
+                direction = None
+                
+                # 出向：源IP在内部 且 目的IP在外部
+                if source_in_internal and dest_in_external:
+                    direction = 'outbound'
+                # 入向：源IP在外部 且 目的IP在内部
+                elif source_in_external and dest_in_internal:
+                    direction = 'inbound'
+                # 同墙：源IP和目的IP都在内部
+                elif source_in_internal and dest_in_internal:
+                    direction = 'same_firewall'
+                
+                # 只有明确匹配到方向的才加入结果
+                if direction:
                     matched_firewalls.append({
                         'firewall': firewall,
-                        'source_match': source_match,
-                        'dest_match': dest_match
+                        'direction': direction,
+                        'source_in_internal': source_in_internal,
+                        'source_in_external': source_in_external,
+                        'dest_in_internal': dest_in_internal,
+                        'dest_in_external': dest_in_external
                     })
             
             return matched_firewalls
@@ -93,21 +121,26 @@ class FirewallMatcher:
             print(f"防火墙匹配失败: {str(e)}")
             return []
     
-    def should_push_same_firewall_policy(self, firewall: Firewall, source_match: bool, dest_match: bool) -> tuple:
+    def should_push_same_firewall_policy(self, firewall: Firewall, direction: str) -> tuple:
         """
-        判断同墙策略是否应该推送
+        判断策略是否应该推送
+        
+        参数:
+            firewall: 防火墙对象
+            direction: 流量方向 ('outbound' | 'inbound' | 'same_firewall')
         
         返回: (should_push: bool, reason: Optional[str])
         """
-        # 源和目的都匹配同一防火墙的内部IP段
-        if source_match and dest_match:
+        # 同墙策略需要检查配置
+        if direction == 'same_firewall':
             # 检查防火墙配置的"同墙推送"选项
             if firewall.allow_same_firewall_push:
                 return True, None  # 推送，无原因
             else:
                 return False, NOT_PUSHED_REASONS['SAME_FIREWALL_NOT_ALLOWED']
         
-        return True, None  # 不是同墙策略，正常推送
+        # 出向和入向策略正常推送
+        return True, None
     
     def _extract_first_ip(self, ip_str: str) -> str:
         """提取第一个IP地址"""
@@ -125,6 +158,23 @@ class FirewallMatcher:
         """
         if firewall.internal_protected_ips:
             for ip_range in firewall.internal_protected_ips.strip().split('\n'):
+                ip_range = ip_range.strip()
+                if not ip_range:
+                    continue
+                try:
+                    network = ipaddress.ip_network(ip_range, strict=False)
+                    if ip_obj in network:
+                        return True
+                except Exception:
+                    continue
+        return False
+    
+    def _ip_in_external_range(self, ip_obj: ipaddress.IPv4Address, firewall: Firewall) -> bool:
+        """
+        检查 IP 是否在防火墙外部防护IP段内
+        """
+        if firewall.external_protected_ips:
+            for ip_range in firewall.external_protected_ips.strip().split('\n'):
                 ip_range = ip_range.strip()
                 if not ip_range:
                     continue

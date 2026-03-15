@@ -122,11 +122,17 @@ def update_firewall(
 
 @router.delete("/{firewall_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_firewall(firewall_id: int, db: Session = Depends(get_db)):
-    """删除防火墙"""
+    """删除防火墙（级联删除关联的策略）"""
+    from app.models import Policy
+    
     db_firewall = db.query(Firewall).filter(Firewall.id == firewall_id).first()
     if not db_firewall:
         raise HTTPException(status_code=404, detail="防火墙不存在")
     
+    # 先删除关联的策略
+    db.query(Policy).filter(Policy.firewall_id == firewall_id).delete()
+    
+    # 再删除防火墙
     db.delete(db_firewall)
     db.commit()
     return None
