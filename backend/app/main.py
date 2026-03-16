@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api import orders, push, firewalls, preview
+from app.api import orders, push, firewalls, preview, zone_access
 from app.core.websocket import mount_socketio
 
 app = FastAPI(
@@ -26,6 +26,7 @@ app.include_router(orders.router)
 app.include_router(push.router)
 app.include_router(firewalls.router)
 app.include_router(preview.router)
+app.include_router(zone_access.router)
 
 
 @app.get("/")

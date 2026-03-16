@@ -8,6 +8,7 @@ import { Preview } from './pages/Preview';
 import { Push } from './pages/Push';
 import FirewallManagement from './pages/FirewallManagement';
 import FirewallForm from './pages/FirewallForm';
+import ZoneAccessConfig from './pages/ZoneAccessConfig';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -32,6 +33,7 @@ function App() {
             <Route path="/firewalls" element={<FirewallManagement />} />
             <Route path="/firewalls/new" element={<FirewallForm />} />
             <Route path="/firewalls/:id/edit" element={<FirewallForm />} />
+            <Route path="/zone-access" element={<ZoneAccessConfig />} />
           </Routes>
         </Layout>
       </BrowserRouter>

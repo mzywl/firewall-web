@@ -1,7 +1,7 @@
 import { useNavigate } from 'react-router-dom';
 import { Button } from '../components/ui/Button';
 import { Card, CardHeader, CardTitle, CardDescription } from '../components/ui/Card';
-import { Upload, FileText } from 'lucide-react';
+import { Upload, FileText, Settings } from 'lucide-react';
 
 export const Home = () => {
   const navigate = useNavigate();
@@ -17,7 +17,7 @@ export const Home = () => {
         </p>
       </div>
 
-      <div className="grid md:grid-cols-2 gap-6 mt-12">
+      <div className="grid md:grid-cols-3 gap-6 mt-12">
         <Card className="hover:shadow-lg transition-shadow cursor-pointer" onClick={() => navigate('/upload')}>
           <CardHeader className="text-center space-y-4 p-8">
             <div className="mx-auto w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center">
@@ -29,6 +29,21 @@ export const Home = () => {
             </CardDescription>
             <Button className="mt-4">
               开始上传
+            </Button>
+          </CardHeader>
+        </Card>
+
+        <Card className="hover:shadow-lg transition-shadow cursor-pointer" onClick={() => navigate('/zone-access')}>
+          <CardHeader className="text-center space-y-4 p-8">
+            <div className="mx-auto w-16 h-16 rounded-full bg-blue-100 flex items-center justify-center">
+              <Settings className="h-8 w-8 text-blue-600" />
+            </div>
+            <CardTitle className="text-2xl">区域访问配置</CardTitle>
+            <CardDescription className="text-base">
+              配置源区域和目的区域的访问规则
+            </CardDescription>
+            <Button className="mt-4 bg-blue-600 hover:bg-blue-700">
+              开始配置
             </Button>
           </CardHeader>
         </Card>
