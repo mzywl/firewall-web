@@ -235,6 +235,24 @@ def list_zone_access_configs(db: Session = Depends(get_db)):
     }
 
 
+@router.delete("/configs/{config_id}")
+def delete_zone_access_config(config_id: int, db: Session = Depends(get_db)):
+    """
+    删除区域访问配置
+    """
+    from app.models import ZoneAccessConfig
+    
+    config = db.query(ZoneAccessConfig).filter(ZoneAccessConfig.id == config_id).first()
+    
+    if not config:
+        raise HTTPException(status_code=404, detail="配置不存在")
+    
+    db.delete(config)
+    db.commit()
+    
+    return {"message": "配置已删除"}
+
+
 def _extract_zones(firewall: Firewall) -> List[str]:
     """
     从防火墙配置中提取区域列表

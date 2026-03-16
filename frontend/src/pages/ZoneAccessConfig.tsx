@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Info, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, Info, AlertTriangle, Edit, Trash2 } from 'lucide-react';
 import { Button } from '../components/ui/Button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../components/ui/Card';
 
@@ -11,6 +11,17 @@ interface Firewall {
   type: string;
   region: string;
   zones: string[];
+}
+
+interface SavedConfig {
+  id: number;
+  source_zone: string;
+  dest_zone: string;
+  firewall_id: number;
+  firewall_name: string;
+  nat_type: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 interface AnalysisResult {
@@ -32,15 +43,18 @@ interface AnalysisResult {
 export default function ZoneAccessConfig() {
   const navigate = useNavigate();
   const [firewalls, setFirewalls] = useState<Firewall[]>([]);
+  const [savedConfigs, setSavedConfigs] = useState<SavedConfig[]>([]);
   const [sourceZone, setSourceZone] = useState('');
   const [destZone, setDestZone] = useState('');
   const [selectedFirewall, setSelectedFirewall] = useState<number | null>(null);
   const [natType, setNatType] = useState<string>('');
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [editingConfigId, setEditingConfigId] = useState<number | null>(null);
 
   useEffect(() => {
     loadFirewalls();
+    loadSavedConfigs();
   }, []);
 
   const loadFirewalls = async () => {
@@ -51,6 +65,48 @@ export default function ZoneAccessConfig() {
     } catch (error) {
       console.error('加载防火墙列表失败:', error);
       alert('加载防火墙列表失败');
+    }
+  };
+
+  const loadSavedConfigs = async () => {
+    try {
+      const response = await fetch('http://localhost:8000/api/zone-access/configs');
+      const data = await response.json();
+      setSavedConfigs(data.configs);
+    } catch (error) {
+      console.error('加载配置列表失败:', error);
+    }
+  };
+
+  const handleEdit = (config: SavedConfig) => {
+    setSourceZone(config.source_zone);
+    setDestZone(config.dest_zone);
+    setSelectedFirewall(config.firewall_id);
+    setNatType(config.nat_type || '');
+    setEditingConfigId(config.id);
+    // 滚动到表单
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleDelete = async (configId: number) => {
+    if (!confirm('确定要删除这条配置吗？')) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`http://localhost:8000/api/zone-access/configs/${configId}`, {
+        method: 'DELETE'
+      });
+
+      if (response.ok) {
+        alert('配置已删除');
+        loadSavedConfigs();
+      } else {
+        alert('删除失败');
+      }
+    } catch (error) {
+      console.error('删除失败:', error);
+      alert('删除失败');
     }
   };
 
@@ -298,6 +354,17 @@ export default function ZoneAccessConfig() {
 
                   const data = await response.json();
                   alert(data.message || '配置已保存');
+                  
+                  // 重新加载配置列表
+                  loadSavedConfigs();
+                  
+                  // 重置表单
+                  setSourceZone('');
+                  setDestZone('');
+                  setSelectedFirewall(null);
+                  setNatType('');
+                  setAnalysisResult(null);
+                  setEditingConfigId(null);
                 } catch (error) {
                   console.error('保存失败:', error);
                   alert('保存失败');
@@ -305,10 +372,77 @@ export default function ZoneAccessConfig() {
               }}
               disabled={!selectedFirewall}
             >
-              保存配置
+              {editingConfigId ? '更新配置' : '保存配置'}
             </Button>
           </div>
         </>
+      )}
+
+      {/* 已保存的配置列表 */}
+      {savedConfigs.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>已保存的配置</CardTitle>
+            <CardDescription>
+              共 {savedConfigs.length} 条配置
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="border rounded-lg overflow-hidden">
+              <table className="w-full text-sm">
+                <thead className="bg-muted">
+                  <tr>
+                    <th className="px-4 py-2 text-left">源区域</th>
+                    <th className="px-4 py-2 text-left">目的区域</th>
+                    <th className="px-4 py-2 text-left">防火墙</th>
+                    <th className="px-4 py-2 text-left">NAT类型</th>
+                    <th className="px-4 py-2 text-left">更新时间</th>
+                    <th className="px-4 py-2 text-center">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {savedConfigs.map((config) => (
+                    <tr key={config.id} className="border-t">
+                      <td className="px-4 py-2">{config.source_zone}</td>
+                      <td className="px-4 py-2">{config.dest_zone}</td>
+                      <td className="px-4 py-2">{config.firewall_name}</td>
+                      <td className="px-4 py-2">
+                        {config.nat_type ? (
+                          <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs">
+                            {config.nat_type}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">无需NAT</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2 text-muted-foreground">
+                        {new Date(config.updated_at).toLocaleString('zh-CN')}
+                      </td>
+                      <td className="px-4 py-2">
+                        <div className="flex items-center justify-center gap-2">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleEdit(config)}
+                          >
+                            <Edit className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleDelete(config.id)}
+                          >
+                            <Trash2 className="h-4 w-4 text-red-500" />
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
       )}
     </div>
   );
