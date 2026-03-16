@@ -117,7 +117,6 @@ def get_preview_data(order_id: int, db: Session = Depends(get_db)):
         # 添加序号
         for idx, p in enumerate(merged, start=1):
             p['sequence'] = idx
-            print(f"DEBUG: 添加序号 {idx} 到策略，当前字段: {list(p.keys())}")
             
             # 重新生成NAT策略（合并后的）
             if p.get('original_data'):
