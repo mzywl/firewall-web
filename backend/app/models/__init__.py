@@ -133,6 +133,9 @@ class Firewall(Base):
     is_active = Column(Integer, default=1, comment="是否启用(0:否, 1:是)")
     created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment="更新时间")
+    
+    # 关联关系
+    zones = relationship("FirewallZone", back_populates="firewall", cascade="all, delete-orphan")
 
 
 class OperationLog(Base):
@@ -181,4 +184,41 @@ class ZoneAccessConfig(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment="更新时间")
     
     # 关联关系
+    firewall = relationship("Firewall")
+
+
+class FirewallZone(Base):
+    """防火墙区域表"""
+    __tablename__ = "firewall_zones"
+
+    id = Column(Integer, primary_key=True, index=True)
+    firewall_id = Column(Integer, ForeignKey("firewalls.id"), nullable=False, comment="防火墙ID")
+    zone_name = Column(String(100), nullable=False, comment="区域名称")
+    protected_ips = Column(Text, comment="保护的IP段（每行一个网段）")
+    description = Column(Text, comment="区域描述")
+    created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment="更新时间")
+    
+    # 关联关系
+    firewall = relationship("Firewall", back_populates="zones")
+
+
+class ZoneAccessRule(Base):
+    """区域访问规则表"""
+    __tablename__ = "zone_access_rules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    source_zone_id = Column(Integer, ForeignKey("firewall_zones.id"), nullable=False, comment="源区域ID")
+    dest_zone_id = Column(Integer, ForeignKey("firewall_zones.id"), nullable=False, comment="目的区域ID")
+    firewall_id = Column(Integer, ForeignKey("firewalls.id"), nullable=False, comment="防火墙ID")
+    allow_access = Column(Integer, default=1, comment="是否允许访问（1=允许，0=拒绝）")
+    nat_type = Column(String(20), comment="NAT类型: SNAT/DNAT/BOTH/None")
+    description = Column(Text, comment="规则描述")
+    created_by = Column(String(100), comment="创建人")
+    created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment="更新时间")
+    
+    # 关联关系
+    source_zone = relationship("FirewallZone", foreign_keys=[source_zone_id])
+    dest_zone = relationship("FirewallZone", foreign_keys=[dest_zone_id])
     firewall = relationship("Firewall")
