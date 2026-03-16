@@ -190,10 +190,31 @@ export const Preview = () => {
             {previewData.unmatched_policies.length > 0 && (
               <div>
                 <div className="font-semibold text-orange-600 mb-1">
-                  无法匹配防火墙的策略（{previewData.unmatched_policies.length} 条）：
+                  未匹配防火墙的策略（{previewData.unmatched_policies.length} 条）：
                 </div>
-                <div className="text-sm text-orange-600">
-                  这些策略无法自动匹配到防火墙，请检查目的IP是否在防火墙管理范围内。
+                <div className="border rounded-lg overflow-hidden mt-2">
+                  <table className="w-full text-sm">
+                    <thead className="bg-orange-100">
+                      <tr>
+                        <th className="px-4 py-2 text-left w-16">序号</th>
+                        <th className="px-4 py-2 text-left">源IP</th>
+                        <th className="px-4 py-2 text-left">目的IP</th>
+                        <th className="px-4 py-2 text-left">服务/端口</th>
+                        <th className="px-4 py-2 text-left">原因</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {previewData.unmatched_policies.map((policy) => (
+                        <tr key={policy.id} className="border-t">
+                          <td className="px-4 py-2 font-semibold text-center">{policy.sequence}</td>
+                          <td className="px-4 py-2 whitespace-pre-line">{policy.source_ip}</td>
+                          <td className="px-4 py-2 whitespace-pre-line">{policy.dest_ip}</td>
+                          <td className="px-4 py-2 whitespace-pre-line">{policy.service}</td>
+                          <td className="px-4 py-2 text-orange-600">{policy.not_pushed_reason}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               </div>
             )}
@@ -242,6 +263,7 @@ export const Preview = () => {
               <table className="w-full text-sm">
                 <thead className="bg-muted">
                   <tr>
+                    <th className="px-4 py-2 text-left w-16">序号</th>
                     <th className="px-4 py-2 text-left">源区域</th>
                     <th className="px-4 py-2 text-left">源IP</th>
                     <th className="px-4 py-2 text-left">目的区域</th>
@@ -256,11 +278,12 @@ export const Preview = () => {
                     <>
                       {/* 原始策略行 */}
                       <tr key={policy.id} className="border-t hover:bg-muted/50">
+                        <td className="px-4 py-2 font-semibold text-center">{policy.sequence}</td>
                         <td className="px-4 py-2">{policy.source_zone}</td>
-                        <td className="px-4 py-2">{policy.source_ip}</td>
+                        <td className="px-4 py-2 whitespace-pre-line">{policy.source_ip}</td>
                         <td className="px-4 py-2">{policy.dest_zone}</td>
-                        <td className="px-4 py-2">{policy.dest_ip}</td>
-                        <td className="px-4 py-2">{policy.service}</td>
+                        <td className="px-4 py-2 whitespace-pre-line">{policy.dest_ip}</td>
+                        <td className="px-4 py-2 whitespace-pre-line">{policy.service}</td>
                         <td className="px-4 py-2">{policy.action}</td>
                         <td className="px-4 py-2">
                           {policy.nat_info.need_nat ? (
@@ -279,8 +302,9 @@ export const Preview = () => {
                       {/* NAT转换后的策略行 */}
                       {policy.nat_policies.map((natPolicy, idx) => (
                         <tr key={`${policy.id}-nat-${idx}`} className="border-t bg-blue-50">
+                          <td className="px-4 py-2"></td>
                           <td className="px-4 py-2 text-blue-700">{natPolicy.source_zone}</td>
-                          <td className="px-4 py-2 text-blue-700">
+                          <td className="px-4 py-2 text-blue-700 whitespace-pre-line">
                             {natPolicy.source_ip}
                             {natPolicy.type === 'SNAT' && (
                               <span className="ml-2 px-2 py-0.5 bg-blue-200 text-blue-800 text-xs rounded">
@@ -289,7 +313,7 @@ export const Preview = () => {
                             )}
                           </td>
                           <td className="px-4 py-2 text-blue-700">{natPolicy.dest_zone}</td>
-                          <td className="px-4 py-2 text-blue-700">
+                          <td className="px-4 py-2 text-blue-700 whitespace-pre-line">
                             {natPolicy.dest_ip}
                             {natPolicy.type === 'DNAT' && (
                               <span className="ml-2 px-2 py-0.5 bg-green-200 text-green-800 text-xs rounded">
@@ -297,7 +321,7 @@ export const Preview = () => {
                               </span>
                             )}
                           </td>
-                          <td className="px-4 py-2 text-blue-700">{natPolicy.service}</td>
+                          <td className="px-4 py-2 text-blue-700 whitespace-pre-line">{natPolicy.service}</td>
                           <td className="px-4 py-2 text-blue-700">{natPolicy.action}</td>
                           <td className="px-4 py-2">
                             <span className="text-xs text-blue-600">转换后</span>
@@ -308,7 +332,7 @@ export const Preview = () => {
                       {/* NAT警告 */}
                       {policy.nat_info.warnings.length > 0 && (
                         <tr className="border-t bg-yellow-50">
-                          <td colSpan={7} className="px-4 py-2">
+                          <td colSpan={8} className="px-4 py-2">
                             <div className="flex items-start gap-2">
                               <AlertTriangle className="h-4 w-4 text-yellow-600 mt-0.5" />
                               <div className="text-sm text-yellow-700">

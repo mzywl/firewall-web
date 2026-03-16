@@ -8,6 +8,7 @@ from app.database import get_db
 from app.models import Order, Policy, Firewall
 from app.core.firewall_matcher import FirewallMatcher, NOT_PUSHED_REASONS
 from app.core.nat_analyzer import NATAnalyzer
+from app.core.policy_splitter import PolicySplitter, PolicyMerger
 
 router = APIRouter(prefix="/api/workorders", tags=["preview"])
 
@@ -50,22 +51,28 @@ def get_preview_data(order_id: int, db: Session = Depends(get_db)):
     # 初始化分析器
     matcher = FirewallMatcher(db)
     nat_analyzer = NATAnalyzer(db)
+    splitter = PolicySplitter(db)
     
-    # 按防火墙分组
+    # 按防火墙分组（用于拆分后的策略）
     firewall_groups = {}
     not_pushed_policies = []
     warnings = []
     errors = []
     
     for policy in policies:
-        # 使用新的多防火墙匹配逻辑
-        matched_firewalls = matcher.match_firewalls_by_policy(
-            policy.source_ip or "",
-            policy.dest_ip or ""
+        # 拆分源地址和目的地址（按换行符）
+        source_ips = [ip.strip() for ip in (policy.source_ip or "").split('\n') if ip.strip()]
+        dest_ips = [ip.strip() for ip in (policy.dest_ip or "").split('\n') if ip.strip()]
+        
+        # 使用策略拆分器：一行策略可能拆分成多个防火墙的多条策略
+        split_policies = splitter.split_policy(
+            source_ips, dest_ips, 
+            policy.service or "", 
+            policy.action or "permit"
         )
         
         # 如果没有匹配到任何防火墙
-        if not matched_firewalls:
+        if not split_policies:
             not_pushed_policies.append({
                 "id": policy.id,
                 "source_zone": policy.source_zone,
@@ -78,10 +85,10 @@ def get_preview_data(order_id: int, db: Session = Depends(get_db)):
             })
             continue
         
-        # 遍历所有匹配的防火墙
-        for match in matched_firewalls:
-            firewall = match['firewall']
-            direction = match['direction']
+        # 遍历拆分后的策略
+        for split_policy in split_policies:
+            firewall = split_policy['firewall']
+            direction = split_policy['direction']
             
             # 判断是否应该推送（同墙策略检查）
             should_push, not_push_reason = matcher.should_push_same_firewall_policy(
@@ -93,19 +100,21 @@ def get_preview_data(order_id: int, db: Session = Depends(get_db)):
                 not_pushed_policies.append({
                     "id": policy.id,
                     "source_zone": policy.source_zone,
-                    "source_ip": policy.source_ip,
+                    "source_ip": '\n'.join(split_policy['source_ips']),
                     "dest_zone": policy.dest_zone,
-                    "dest_ip": policy.dest_ip,
-                    "service": policy.service,
-                    "action": policy.action,
+                    "dest_ip": '\n'.join(split_policy['dest_ips']),
+                    "service": split_policy['service'],
+                    "action": split_policy['action'],
                     "not_pushed_reason": not_push_reason
                 })
                 continue
             
-            # 分析NAT需求
+            # 分析NAT需求（使用拆分后的第一个IP）
+            first_source = split_policy['source_ips'][0] if split_policy['source_ips'] else ""
+            first_dest = split_policy['dest_ips'][0] if split_policy['dest_ips'] else ""
             nat_info = nat_analyzer.analyze_policy(
-                policy.source_ip or "",
-                policy.dest_ip or "",
+                first_source,
+                first_dest,
                 firewall
             )
             
@@ -118,11 +127,12 @@ def get_preview_data(order_id: int, db: Session = Depends(get_db)):
             policy_data = {
                 "id": policy.id,
                 "source_zone": policy.source_zone,
-                "source_ip": policy.source_ip,
+                "source_ip": '\n'.join(split_policy['source_ips']),
                 "dest_zone": policy.dest_zone,
-                "dest_ip": policy.dest_ip,
-                "service": policy.service,
-                "action": policy.action,
+                "dest_ip": '\n'.join(split_policy['dest_ips']),
+                "service": split_policy['service'],
+                "action": split_policy['action'],
+                "direction": direction,
                 "nat_info": nat_info,
                 "nat_policies": []
             }
@@ -153,8 +163,40 @@ def get_preview_data(order_id: int, db: Session = Depends(get_db)):
             
             firewall_groups[firewall_id]["policies"].append(policy_data)
     
+    # 对每个防火墙的策略进行合并
+    for firewall_id in firewall_groups:
+        # 转换为合并器需要的格式
+        policies_to_merge = []
+        for p in firewall_groups[firewall_id]["policies"]:
+            policies_to_merge.append({
+                'source_ips': p['source_ip'].split('\n'),
+                'dest_ips': p['dest_ip'].split('\n'),
+                'service': p['service'],
+                'action': p['action'],
+                'original_data': p  # 保留原始数据
+            })
+        
+        # 执行三步合并
+        merged = PolicyMerger.merge_policies(policies_to_merge)
+        
+        # 转换回显示格式并添加序号
+        merged_policies = []
+        for idx, m in enumerate(merged, start=1):
+            original = m['original_data']
+            original['source_ip'] = '\n'.join(m['source_ips'])
+            original['dest_ip'] = '\n'.join(m['dest_ips'])
+            original['service'] = m['service']
+            original['sequence'] = idx  # 添加序号
+            merged_policies.append(original)
+        
+        firewall_groups[firewall_id]["policies"] = merged_policies
+    
     # 转换为列表
     firewalls_list = list(firewall_groups.values())
+    
+    # 为未匹配策略添加序号
+    for idx, p in enumerate(not_pushed_policies, start=1):
+        p['sequence'] = idx
     
     return {
         "order": {

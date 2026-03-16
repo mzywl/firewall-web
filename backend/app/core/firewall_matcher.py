@@ -36,10 +36,11 @@ class FirewallMatcher:
         """
         根据策略的源IP和目的IP匹配所有相关防火墙
         
-        匹配规则：
-        1. 出向：源IP在内部区域 且 目的IP在外部区域
-        2. 入向：源IP在外部区域 且 目的IP在内部区域
-        3. 同墙：源IP和目的IP都在内部区域
+        匹配规则（必须源或目的至少有一个在内部区域）：
+        1. 源IP在内部 + 目的IP在内部 → 同墙
+        2. 源IP在内部 + 目的IP在外部 → 出向
+        3. 源IP在外部 + 目的IP在内部 → 入向
+        4. 其他情况 → 未匹配
         
         返回: [
             {
@@ -85,25 +86,31 @@ class FirewallMatcher:
                 # 检查源IP
                 if source_ip_obj:
                     source_in_internal = self._ip_in_internal_range(source_ip_obj, firewall)
-                    source_in_external = self._ip_in_external_range(source_ip_obj, firewall)
+                    if not source_in_internal:
+                        source_in_external = self._ip_in_external_range(source_ip_obj, firewall)
                 
                 # 检查目的IP
                 if dest_ip_obj:
                     dest_in_internal = self._ip_in_internal_range(dest_ip_obj, firewall)
-                    dest_in_external = self._ip_in_external_range(dest_ip_obj, firewall)
+                    if not dest_in_internal:
+                        dest_in_external = self._ip_in_external_range(dest_ip_obj, firewall)
                 
-                # 判断流量方向
+                # 判断流量方向（必须源或目的至少有一个在内部）
                 direction = None
                 
-                # 出向：源IP在内部 且 目的IP在外部
-                if source_in_internal and dest_in_external:
-                    direction = 'outbound'
-                # 入向：源IP在外部 且 目的IP在内部
-                elif source_in_external and dest_in_internal:
-                    direction = 'inbound'
-                # 同墙：源IP和目的IP都在内部
-                elif source_in_internal and dest_in_internal:
-                    direction = 'same_firewall'
+                if source_in_internal:
+                    # 源IP在内部
+                    if dest_in_internal:
+                        direction = 'same_firewall'  # 同墙
+                    elif dest_in_external:
+                        direction = 'outbound'  # 出向
+                    # 如果目的IP既不在内部也不在外部，direction保持None（未匹配）
+                elif source_in_external:
+                    # 源IP在外部
+                    if dest_in_internal:
+                        direction = 'inbound'  # 入向
+                    # 其他情况direction保持None（未匹配）
+                # 如果源IP既不在内部也不在外部，direction保持None（未匹配）
                 
                 # 只有明确匹配到方向的才加入结果
                 if direction:
@@ -143,14 +150,32 @@ class FirewallMatcher:
         return True, None
     
     def _extract_first_ip(self, ip_str: str) -> str:
-        """提取第一个IP地址"""
+        """
+        提取第一个IP地址
+        支持格式：
+        - 单个IP: 10.2.179.127
+        - 逗号分隔: 10.2.179.127,10.2.179.128
+        - IP范围: 10.2.179.127-10.2.179.132
+        - 换行分隔: 10.2.179.127\n10.2.179.128
+        """
         if not ip_str:
             return ""
-        # 简单处理：取第一个非空部分
-        parts = ip_str.strip().split(',')
-        if parts:
-            return parts[0].strip()
-        return ip_str.strip()
+        
+        # 先按换行分割
+        lines = ip_str.strip().split('\n')
+        first_line = lines[0].strip() if lines else ip_str.strip()
+        
+        # 再按逗号分割
+        parts = first_line.split(',')
+        first_part = parts[0].strip() if parts else first_line
+        
+        # 处理IP范围（如 10.2.179.127-10.2.179.132）
+        if '-' in first_part:
+            range_parts = first_part.split('-')
+            if range_parts:
+                return range_parts[0].strip()
+        
+        return first_part
     
     def _ip_in_internal_range(self, ip_obj: ipaddress.IPv4Address, firewall: Firewall) -> bool:
         """
