@@ -164,3 +164,21 @@ class PolicyVersion(Base):
     
     # 关联关系
     order = relationship("Order")
+
+
+class ZoneAccessConfig(Base):
+    """区域访问配置表"""
+    __tablename__ = "zone_access_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    source_zone = Column(String(100), nullable=False, comment="源区域")
+    dest_zone = Column(String(100), nullable=False, comment="目的区域")
+    firewall_id = Column(Integer, ForeignKey("firewalls.id"), nullable=False, comment="防火墙ID")
+    nat_type = Column(String(20), comment="NAT类型: SNAT/DNAT/BOTH/None")
+    description = Column(Text, comment="配置说明")
+    created_by = Column(String(100), comment="创建人")
+    created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment="更新时间")
+    
+    # 关联关系
+    firewall = relationship("Firewall")

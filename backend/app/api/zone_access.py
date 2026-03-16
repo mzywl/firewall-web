@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Dict, Optional
 from pydantic import BaseModel
+from datetime import datetime
 from app.database import get_db
 from app.models import Firewall
 
@@ -142,6 +143,94 @@ def analyze_zone_access(
                 "alias": fw.alias
             }
             for fw in dest_firewalls
+        ]
+    }
+
+
+@router.post("/save")
+def save_zone_access_config(
+    config: ZoneAccessConfigCreate,
+    db: Session = Depends(get_db)
+):
+    """
+    保存区域访问配置
+    """
+    from app.models import ZoneAccessConfig
+    
+    # 检查是否已存在相同配置
+    existing = db.query(ZoneAccessConfig).filter(
+        ZoneAccessConfig.source_zone == config.source_zone,
+        ZoneAccessConfig.dest_zone == config.dest_zone,
+        ZoneAccessConfig.firewall_id == config.firewall_id
+    ).first()
+    
+    if existing:
+        # 更新现有配置
+        existing.nat_type = config.nat_type
+        existing.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(existing)
+        
+        return {
+            "message": "配置已更新",
+            "config": {
+                "id": existing.id,
+                "source_zone": existing.source_zone,
+                "dest_zone": existing.dest_zone,
+                "firewall_id": existing.firewall_id,
+                "nat_type": existing.nat_type,
+                "created_at": existing.created_at.isoformat(),
+                "updated_at": existing.updated_at.isoformat()
+            }
+        }
+    else:
+        # 创建新配置
+        new_config = ZoneAccessConfig(
+            source_zone=config.source_zone,
+            dest_zone=config.dest_zone,
+            firewall_id=config.firewall_id,
+            nat_type=config.nat_type
+        )
+        db.add(new_config)
+        db.commit()
+        db.refresh(new_config)
+        
+        return {
+            "message": "配置已保存",
+            "config": {
+                "id": new_config.id,
+                "source_zone": new_config.source_zone,
+                "dest_zone": new_config.dest_zone,
+                "firewall_id": new_config.firewall_id,
+                "nat_type": new_config.nat_type,
+                "created_at": new_config.created_at.isoformat(),
+                "updated_at": new_config.updated_at.isoformat()
+            }
+        }
+
+
+@router.get("/configs")
+def list_zone_access_configs(db: Session = Depends(get_db)):
+    """
+    获取所有区域访问配置
+    """
+    from app.models import ZoneAccessConfig
+    
+    configs = db.query(ZoneAccessConfig).all()
+    
+    return {
+        "configs": [
+            {
+                "id": cfg.id,
+                "source_zone": cfg.source_zone,
+                "dest_zone": cfg.dest_zone,
+                "firewall_id": cfg.firewall_id,
+                "firewall_name": cfg.firewall.name if cfg.firewall else None,
+                "nat_type": cfg.nat_type,
+                "created_at": cfg.created_at.isoformat(),
+                "updated_at": cfg.updated_at.isoformat()
+            }
+            for cfg in configs
         ]
     }
 

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, AlertTriangle, CheckCircle, Info } from 'lucide-react';
 import { Button } from '../components/ui/Button';
@@ -275,7 +275,7 @@ export const Preview = () => {
                 </thead>
                 <tbody>
                   {group.policies.map((policy) => (
-                    <>
+                    <React.Fragment key={policy.id || policy.original_policy_id}>
                       {/* 原始策略行 */}
                       <tr key={policy.id} className="border-t hover:bg-muted/50">
                         <td className="px-4 py-2 font-semibold text-center">{policy.sequence}</td>
@@ -342,7 +342,7 @@ export const Preview = () => {
                           </td>
                         </tr>
                       )}
-                    </>
+                    </React.Fragment>
                   ))}
                 </tbody>
               </table>

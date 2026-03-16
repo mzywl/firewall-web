@@ -278,8 +278,30 @@ export default function ZoneAccessConfig() {
               重置
             </Button>
             <Button
-              onClick={() => {
-                alert('配置已保存（功能开发中）');
+              onClick={async () => {
+                if (!selectedFirewall) {
+                  alert('请选择防火墙');
+                  return;
+                }
+
+                try {
+                  const response = await fetch('http://localhost:8000/api/zone-access/save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      source_zone: sourceZone,
+                      dest_zone: destZone,
+                      firewall_id: selectedFirewall,
+                      nat_type: natType || null
+                    })
+                  });
+
+                  const data = await response.json();
+                  alert(data.message || '配置已保存');
+                } catch (error) {
+                  console.error('保存失败:', error);
+                  alert('保存失败');
+                }
               }}
               disabled={!selectedFirewall}
             >
