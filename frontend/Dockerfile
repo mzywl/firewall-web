@@ -1,5 +1,13 @@
 FROM node:20-alpine
 
+# 显式清空代理（宿主机设置了 HTTP_PROXY，容器内 127.0.0.1 指向自己，必须禁用）
+ENV HTTP_PROXY=""
+ENV HTTPS_PROXY=""
+ENV http_proxy=""
+ENV https_proxy=""
+ENV ALL_PROXY=""
+ENV no_proxy="localhost,127.0.0.1"
+
 WORKDIR /app
 
 # 复制依赖文件

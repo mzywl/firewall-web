@@ -256,16 +256,35 @@ def delete_zone_access_config(config_id: int, db: Session = Depends(get_db)):
 def _extract_zones(firewall: Firewall) -> List[str]:
     """
     从防火墙配置中提取区域列表
-    
-    目前从 region 字段提取，未来可以扩展到专门的区域配置表
+
+    综合考虑：
+    1. region（地理/数据中心区域）
+    2. local_zone_name（本地防护区域，如 trust）
+    3. external_zone_name（外部防护区域，如 untrust）
+    4. firewall_zones 表中的显式配置（如有）
     """
     zones = []
-    
-    # 从 region 字段提取
+
+    # 1) region
     if firewall.region:
         zones.append(firewall.region)
-    
-    # TODO: 未来可以从专门的区域配置表中提取
-    # 例如：firewall.zones 关联表
-    
+
+    # 2) 本地/外部 zone 名称
+    if firewall.local_zone_name:
+        zones.append(firewall.local_zone_name)
+    if firewall.external_zone_name:
+        zones.append(firewall.external_zone_name)
+
+    # 3) firewall_zones 表（feature 引入的显式 zone 配置）
+    try:
+        from app.models import FirewallZone
+        explicit_zones = [
+            z.zone_name for z in firewall.zones
+            if z.zone_name and z.zone_name not in zones
+        ]
+        zones.extend(explicit_zones)
+    except Exception:
+        # 没有 zones 关系或查询失败时忽略
+        pass
+
     return zones
