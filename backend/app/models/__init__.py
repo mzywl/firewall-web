@@ -222,3 +222,94 @@ class ZoneAccessRule(Base):
     source_zone = relationship("FirewallZone", foreign_keys=[source_zone_id])
     dest_zone = relationship("FirewallZone", foreign_keys=[dest_zone_id])
     firewall = relationship("Firewall")
+
+
+
+class PushMode(str, enum.Enum):
+    """推送模式"""
+    deduplicate = "deduplicate"  # 查重模式：复用整条 + 复用对象
+    force_push = "force_push"    # 全推模式：只复用对象，整条必新建
+
+
+class PushSnapshotStatus(str, enum.Enum):
+    """推送快照状态"""
+    running = "running"
+    success = "success"
+    failed = "failed"
+    partial = "partial"  # 部分成功
+
+
+class PushedPolicySnapshot(Base):
+    """已推送策略批次快照（可追溯 + 查重用）"""
+    __tablename__ = "pushed_policy_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    order_id = Column(Integer, ForeignKey("orders.id"), nullable=False, index=True, comment="工单ID")
+    firewall_id = Column(Integer, ForeignKey("firewalls.id"), nullable=False, index=True, comment="防火墙ID")
+    batch_id = Column(String(50), nullable=False, index=True, comment="推送批次UUID")
+
+    push_mode = Column(Enum(PushMode), nullable=False, comment="推送模式")
+    status = Column(Enum(PushSnapshotStatus), default=PushSnapshotStatus.running, comment="状态")
+
+    # 统计
+    total_policies = Column(Integer, default=0, comment="工单总策略数")
+    new_policies = Column(Integer, default=0, comment="新建数")
+    reused_policies = Column(Integer, default=0, comment="复用整条数（仅deduplicate模式）")
+    appended_policies = Column(Integer, default=0, comment="追加数（仅deduplicate模式）")
+    failed_policies = Column(Integer, default=0, comment="失败数")
+
+    # 设备侧拉取的快照（全量存，可追溯）
+    fetched_addresses_json = Column(Text, comment="拉取的地址对象JSON")
+    fetched_policies_json = Column(Text, comment="拉取的策略JSON")
+    fetched_services_json = Column(Text, comment="拉取的端口对象JSON")
+
+    # 错误
+    error_log = Column(Text, comment="错误日志")
+
+    # 时间
+    started_at = Column(DateTime, default=datetime.utcnow, comment="开始时间")
+    finished_at = Column(DateTime, comment="结束时间")
+    created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
+
+    # 关联
+    items = relationship("PushedPolicyItem", back_populates="snapshot", cascade="all, delete-orphan")
+    order = relationship("Order")
+    firewall = relationship("Firewall")
+
+
+class PushedPolicyItem(Base):
+    """每条策略的推送明细（用于精确查重 + 回滚/审计）"""
+    __tablename__ = "pushed_policy_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    snapshot_id = Column(Integer, ForeignKey("pushed_policy_snapshots.id"), nullable=False, index=True, comment="所属快照ID")
+    order_id = Column(Integer, ForeignKey("orders.id"), nullable=False, comment="工单ID")
+    firewall_id = Column(Integer, ForeignKey("firewalls.id"), nullable=False, index=True, comment="防火墙ID")
+    policy_id = Column(Integer, comment="工单中的Policy表ID")
+
+    # 4 维度匹配键（用于查重）
+    match_key = Column(String(64), index=True, comment="4维度hash（SHA1前30位）")
+    src_addr_key = Column(String(2000), comment="源IP（排序去重）")
+    dst_addr_key = Column(String(2000), comment="目的IP（排序去重）")
+    service_key = Column(String(500), comment="端口（排序去重）")
+    schedule_key = Column(String(100), comment="有效期（标准化）")
+
+    # 设备上实际对象名
+    device_src_obj = Column(String(200), comment="设备上源地址对象名")
+    device_dst_obj = Column(String(200), comment="设备上目的地址对象名")
+    device_service_obj = Column(String(200), comment="设备上端口对象名")
+    device_schedule_obj = Column(String(200), comment="设备上时间对象名")
+
+    # 设备上的策略标识
+    device_policy_id = Column(String(100), comment="设备上策略ID/H3C rule name等")
+    device_policy_name = Column(String(200), comment="设备上策略名")
+
+    # 动作
+    action = Column(String(20), comment="created/reused/appended/failed")
+    raw_commands = Column(Text, comment="实际推送的命令（用于回滚/审计）")
+    error_msg = Column(Text, comment="本条错误信息")
+
+    created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
+
+    # 关联
+    snapshot = relationship("PushedPolicySnapshot", back_populates="items")
