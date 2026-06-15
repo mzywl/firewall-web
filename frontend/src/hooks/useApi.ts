@@ -35,7 +35,7 @@ export const useVersions = (orderId: number) => {
 // 上传文件
 export const useUploadExcel = () => {
   const queryClient = useQueryClient();
-  
+
   return useMutation({
     mutationFn: ({ file, title, createdBy }: { file: File; title?: string; createdBy?: string }) =>
       api.uploadExcel(file, title, createdBy),
@@ -48,7 +48,7 @@ export const useUploadExcel = () => {
 // 更新策略
 export const useUpdatePolicies = (orderId: number) => {
   const queryClient = useQueryClient();
-  
+
   return useMutation({
     mutationFn: (policies: Policy[]) => api.updatePolicies(orderId, policies),
     onSuccess: () => {
@@ -58,10 +58,10 @@ export const useUpdatePolicies = (orderId: number) => {
   });
 };
 
-// 开始推送
+// 开始推送（v1 旧版，保留兼容）
 export const useStartPush = (orderId: number) => {
   const queryClient = useQueryClient();
-  
+
   return useMutation({
     mutationFn: () => api.startPush(orderId),
     onSuccess: () => {
@@ -78,12 +78,84 @@ export const useMergePolicies = (orderId: number) => {
   });
 };
 
-// 获取推送状态
+// 获取推送状态（旧版）
 export const usePushStatus = (orderId: number, enabled: boolean = true) => {
   return useQuery({
     queryKey: ['pushStatus', orderId],
     queryFn: () => api.getPushStatus(orderId),
     enabled: !!orderId && enabled,
-    refetchInterval: 2000, // 每2秒刷新一次
+    refetchInterval: 2000,
+  });
+};
+
+// ============================================================
+// v2 推送 + 防火墙 + 快照 hooks
+// ============================================================
+
+// 列出所有防火墙
+export const useFirewalls = () => {
+  return useQuery({
+    queryKey: ['firewalls'],
+    queryFn: () => api.listFirewalls(),
+    staleTime: 30_000,
+  });
+};
+
+// 测试 SSH 连接
+export const useTestConnection = () => {
+  return useMutation({
+    mutationFn: (firewallId: number) => api.testConnection(firewallId),
+  });
+};
+
+// 启动 v2 推送
+export const useStartPushV2 = (orderId: number) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      firewallId,
+      mode,
+    }: {
+      firewallId: number;
+      mode: api.PushMode;
+    }) => api.startPushV2(orderId, firewallId, mode),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['order', orderId] });
+      if (data.snapshot_id) {
+        queryClient.invalidateQueries({ queryKey: ['snapshot', data.snapshot_id] });
+      }
+    },
+  });
+};
+
+// 查快照详情
+export const useSnapshot = (snapshotId: number | null) => {
+  return useQuery({
+    queryKey: ['snapshot', snapshotId],
+    queryFn: () => api.getSnapshot(snapshotId!),
+    enabled: !!snapshotId,
+  });
+};
+
+// 查快照明细
+export const useSnapshotItems = (snapshotId: number | null) => {
+  return useQuery({
+    queryKey: ['snapshot-items', snapshotId],
+    queryFn: () => api.getSnapshotItems(snapshotId!),
+    enabled: !!snapshotId,
+  });
+};
+
+// 实时日志（轮询；afterSeq 增量）
+export const useSnapshotLogs = (
+  snapshotId: number | null,
+  enabled: boolean = true,
+  intervalMs: number = 1500,
+) => {
+  return useQuery({
+    queryKey: ['snapshot-logs', snapshotId],
+    queryFn: () => api.getSnapshotLogs(snapshotId!, 0),
+    enabled: !!snapshotId && enabled,
+    refetchInterval: intervalMs,
   });
 };
