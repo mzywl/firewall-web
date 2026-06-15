@@ -171,10 +171,12 @@ def get_preview_data(order_id: int, db: Session = Depends(get_db)):
 
 def _generate_nat_policies(original_policy: Dict, nat_info: Dict) -> List[Dict]:
     """
-    生成NAT转换后的策略
+    生成 NAT 转换后的策略（SNAT-only）
+
+    项目已决定取消 DNAT 分析, 故只会生成 SNAT 转换行。
     """
     nat_policies = []
-    
+
     if nat_info["nat_type"] == "SNAT":
         # SNAT：源IP转换
         nat_policies.append({
@@ -186,38 +188,6 @@ def _generate_nat_policies(original_policy: Dict, nat_info: Dict) -> List[Dict]:
             "service": original_policy["service"],
             "action": original_policy["action"]
         })
-    
-    elif nat_info["nat_type"] == "DNAT":
-        # DNAT：目的IP转换
-        nat_policies.append({
-            "type": "DNAT",
-            "source_zone": nat_info["source_zone"],
-            "source_ip": original_policy["source_ip"],
-            "dest_zone": nat_info["dest_zone"],
-            "dest_ip": nat_info["dnat_address"] or "[需要配置DNAT地址]",
-            "service": original_policy["service"],
-            "action": original_policy["action"]
-        })
-    
-    elif nat_info["nat_type"] == "BOTH":
-        # 双向NAT：先SNAT，再DNAT
-        nat_policies.append({
-            "type": "SNAT",
-            "source_zone": nat_info["source_zone"],
-            "source_ip": nat_info["snat_address"] or "[需要配置SNAT地址]",
-            "dest_zone": nat_info["dest_zone"],
-            "dest_ip": original_policy["dest_ip"],
-            "service": original_policy["service"],
-            "action": original_policy["action"]
-        })
-        nat_policies.append({
-            "type": "DNAT",
-            "source_zone": nat_info["source_zone"],
-            "source_ip": nat_info["snat_address"] or "[需要配置SNAT地址]",
-            "dest_zone": nat_info["dest_zone"],
-            "dest_ip": nat_info["dnat_address"] or "[需要配置DNAT地址]",
-            "service": original_policy["service"],
-            "action": original_policy["action"]
-        })
-    
+    # DNAT / BOTH 分支已删除：项目不再分析 DNAT
+
     return nat_policies

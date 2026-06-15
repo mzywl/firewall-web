@@ -6,16 +6,16 @@ import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../co
 
 interface NATInfo {
   need_nat: boolean;
-  nat_type: 'SNAT' | 'DNAT' | 'BOTH' | null;
+  nat_type: 'SNAT' | null;   // 项目已取消 DNAT 分析, 永远只会是 'SNAT' 或 null
   snat_address: string | null;
-  dnat_address: string | null;
+  dnat_address: null;        // 保留字段以兼容, 永远为 null
   source_zone: string | null;
   dest_zone: string | null;
   warnings: string[];
 }
 
 interface NATPolicy {
-  type: 'SNAT' | 'DNAT';
+  type: 'SNAT';               // 项目已取消 DNAT 分析
   source_zone: string;
   source_ip: string;
   dest_zone: string;
@@ -317,11 +317,7 @@ export const Preview = () => {
                           <td className="px-4 py-2 text-blue-700">{natPolicy.dest_zone}</td>
                           <td className="px-4 py-2 text-blue-700 whitespace-pre-line">
                             {natPolicy.dest_ip}
-                            {natPolicy.type === 'DNAT' && (
-                              <span className="ml-2 px-2 py-0.5 bg-green-200 text-green-800 text-xs rounded">
-                                [DNAT]
-                              </span>
-                            )}
+                            {/* DNAT badge 已删除: 项目不再分析 DNAT */}
                           </td>
                           <td className="px-4 py-2 text-blue-700 whitespace-pre-line">{natPolicy.service}</td>
                           <td className="px-4 py-2 text-blue-700">{natPolicy.action}</td>

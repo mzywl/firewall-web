@@ -117,11 +117,10 @@ class Firewall(Base):
     # supported_policy_types 字段保留以兼容旧数据，UI 不再使用
     supported_policy_types = Column(JSON, comment="支持的策略类型数组（已废弃，UI 隐藏）")
 
-    # NAT配置（仅当 is_zone_boundary=1 时由 UI 显示和填写）
+    # SNAT 地址池（仅当 is_zone_boundary=1 时由 UI 显示和填写）
+    # 项目已决定不再分析 DNAT，所以只保留 SNAT 相关字段
     outbound_snat_pool = Column(Text, comment="出向SNAT地址段/地址池名称")
-    inbound_dnat_pool = Column(Text, comment="入向DNAT地址段/地址池名称")
     inbound_snat_pool = Column(Text, comment="入向SNAT地址段/地址池名称")
-    outbound_dnat_pool = Column(Text, comment="出向DNAT地址段/地址池名称")
     
     # 推送配置
     auto_push = Column(Integer, default=1, comment="是否支持自动推送(0:否, 1:是)")
@@ -173,19 +172,18 @@ class PolicyVersion(Base):
 
 
 class ZoneAccessConfig(Base):
-    """区域访问配置表"""
+    """区域访问配置表（仅记录区域关系,不再带 nat_type 字段:项目已取消 DNAT 分析）"""
     __tablename__ = "zone_access_configs"
 
     id = Column(Integer, primary_key=True, index=True)
     source_zone = Column(String(100), nullable=False, comment="源区域")
     dest_zone = Column(String(100), nullable=False, comment="目的区域")
     firewall_id = Column(Integer, ForeignKey("firewalls.id"), nullable=False, comment="防火墙ID")
-    nat_type = Column(String(20), comment="NAT类型: SNAT/DNAT/BOTH/None")
     description = Column(Text, comment="配置说明")
     created_by = Column(String(100), comment="创建人")
     created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment="更新时间")
-    
+
     # 关联关系
     firewall = relationship("Firewall")
 
@@ -207,7 +205,7 @@ class FirewallZone(Base):
 
 
 class ZoneAccessRule(Base):
-    """区域访问规则表"""
+    """区域访问规则表（已取消 nat_type 字段:项目不再分析 DNAT）"""
     __tablename__ = "zone_access_rules"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -215,12 +213,11 @@ class ZoneAccessRule(Base):
     dest_zone_id = Column(Integer, ForeignKey("firewall_zones.id"), nullable=False, comment="目的区域ID")
     firewall_id = Column(Integer, ForeignKey("firewalls.id"), nullable=False, comment="防火墙ID")
     allow_access = Column(Integer, default=1, comment="是否允许访问（1=允许，0=拒绝）")
-    nat_type = Column(String(20), comment="NAT类型: SNAT/DNAT/BOTH/None")
     description = Column(Text, comment="规则描述")
     created_by = Column(String(100), comment="创建人")
     created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment="更新时间")
-    
+
     # 关联关系
     source_zone = relationship("FirewallZone", foreign_keys=[source_zone_id])
     dest_zone = relationship("FirewallZone", foreign_keys=[dest_zone_id])
