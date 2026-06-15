@@ -97,6 +97,7 @@ class FortigateClient(FirewallClient):
         addr_block = self._build_fortigate_address_block(new_policies, existing_addresses)
         addrgrp_block = self._build_fortigate_addrgrp_block(new_policies, existing_addresses)
         svc_block = self._build_fortigate_service_block(new_policies, existing_services)
+        svcgrp_block = self._build_fortigate_service_group_block(new_policies)
         sched_block = self._build_fortigate_schedule_block(new_policies, existing_schedules)
         policy_block = self._build_fortigate_policy_block(new_policies)
 
@@ -111,6 +112,10 @@ class FortigateClient(FirewallClient):
         if svc_block:
             cmds.append("config firewall service custom")
             cmds.extend(svc_block)
+            cmds.append("end")
+        if svcgrp_block:
+            cmds.append("config firewall service group")
+            cmds.extend(svcgrp_block)
             cmds.append("end")
         if sched_block:
             cmds.append("config firewall schedule onetime")
@@ -136,35 +141,82 @@ class FortigateClient(FirewallClient):
                     cmds.append("next")
                 else:
                     cmds.append(f'edit "{p["rule_name"]}-{ip}"')
-                    cmds.append("set type ipmask")
-                    cmds.append(f"set subnet {ip}/32")
+                    cmds.append("set type iprange")
+                    cmds.append(f"set start-ip {ip}")
+                    cmds.append(f"set end-ip {ip}")
                     cmds.append("next")
         return cmds
 
     def _build_fortigate_addrgrp_block(self, policies, existing):
-        # 简化: 直接在 policy 里用个体地址，不建 group
-        return []
+        """为每条策略建 src / dst 两个 addrgrp（成员为该策略的 IP 列表）
+
+        与 _build_fortigate_address_block 配合：
+          - address 名: {rule_name}-{ip}    (个体)
+          - addrgrp 名: {rule_name}-src / -dst  (组，policy 引用此名)
+        """
+        cmds = []
+        for p in policies:
+            src_name = f"{p['rule_name']}-src-group"
+            dst_name = f"{p['rule_name']}-dst-group"
+            # 源组
+            if p["src_ips"]:
+                cmds.append(f'edit "{src_name}"')
+                cmds.append("set member " + " ".join(
+                    f'"{p["rule_name"]}-{ip}"' for ip in p["src_ips"]
+                ))
+                cmds.append("next")
+            # 目的组
+            if p["dst_ips"]:
+                cmds.append(f'edit "{dst_name}"')
+                cmds.append("set member " + " ".join(
+                    f'"{p["rule_name"]}-{ip}"' for ip in p["dst_ips"]
+                ))
+                cmds.append("next")
+        return cmds
 
     def _build_fortigate_service_block(self, policies, existing):
         existing_keys = {(s.protocol, s.dst_port): s.name for s in existing}
         cmds = []
+        # 收集本批推送要建的所有 port（去重）
+        ports_to_create = {}  # name -> proto
         for p in policies:
             for port in p["ports"]:
                 if port.startswith("UDP:"):
                     port_v = port.split(":", 1)[1]
                     if ("udp", port_v) in existing_keys:
                         continue
-                    cmds.append(f'edit "UDP-{port_v}"')
-                    cmds.append("set protocol TCP/UDP/SCTP")
-                    cmds.append(f"set udp-portrange {port_v}")
-                    cmds.append("next")
+                    ports_to_create[f"UDP-{port_v}"] = "udp"
                 else:
                     if ("tcp", port) in existing_keys:
                         continue
-                    cmds.append(f'edit "TCP-{port}"')
-                    cmds.append("set protocol TCP/UDP/SCTP")
-                    cmds.append(f"set tcp-portrange {port}")
-                    cmds.append("next")
+                    ports_to_create[f"TCP-{port}"] = "tcp"
+        # 输出
+        for name, proto in ports_to_create.items():
+            port_v = name.split("-", 1)[1]
+            cmds.append(f'edit "{name}"')
+            cmds.append("set protocol TCP/UDP/SCTP")
+            if proto == "udp":
+                cmds.append(f"set udp-portrange {port_v}")
+            else:
+                cmds.append(f"set tcp-portrange {port_v}")
+            cmds.append("next")
+        return cmds
+
+    def _build_fortigate_service_group_block(self, policies):
+        """为每条策略建 svc group，成员为该策略用到的所有服务对象名"""
+        cmds = []
+        for p in policies:
+            if not p["ports"]:
+                continue
+            members = []
+            for port in p["ports"]:
+                if port.startswith("UDP:"):
+                    members.append(f'"UDP-{port.split(":", 1)[1]}"')
+                else:
+                    members.append(f'"TCP-{port}"')
+            cmds.append(f'edit "{p["rule_name"]}-svc-group"')
+            cmds.append("set member " + " ".join(members))
+            cmds.append("next")
         return cmds
 
     def _build_fortigate_schedule_block(self, policies, existing):

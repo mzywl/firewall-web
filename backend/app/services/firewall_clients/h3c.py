@@ -194,7 +194,8 @@ class H3CClient(FirewallClient):
         # 然后建策略
         cmds.append("security-policy ip")
         for p in new_policies:
-            cmds.append(self._gen_rule_command(p))
+            # 每条策略可能多行命令（rule name + 各属性 + action）
+            cmds.extend(self._gen_rule_command(p))
         cmds.append("quit")
         cmds.append("quit")
         return cmds
@@ -274,10 +275,39 @@ class H3CClient(FirewallClient):
         ]
         return cmds
 
-    def _gen_rule_command(self, p: Dict[str, Any]) -> str:
-        """生成单条 rule 命令（多行用 \n 分隔但本函数只返回第一条；后续 command 由 push 决定）"""
-        # 实际生成在 push 阶段会拆行；这里返回 first line
-        return f'rule name "{p["rule_name"]}"'
+    def _gen_rule_command(self, p: Dict[str, Any]) -> List[str]:
+        """生成 H3C 单条 rule 的完整命令（多行）
+
+        H3C 的 object-group ip address 本身就是"组"形式，所以：
+          - 地址 object-group 命名: {rule_name}-src-{i} / -dst-{i}
+          - 策略 rule 直接引用这些 group 名
+        """
+        cmds = [f'rule name "{p["rule_name"]}"']
+        if p.get("src_zone") and p["src_zone"] != "any":
+            cmds.append(f"source-zone {p['src_zone']}")
+        if p.get("dst_zone") and p["dst_zone"] != "any":
+            cmds.append(f"destination-zone {p['dst_zone']}")
+        # 源 IP：每个 IP 一个 object-group（已由 _gen_address_objects 创建）
+        for i, _ in enumerate(p.get("src_ips", [])):
+            cmds.append(f'source-ip "{p["rule_name"]}-src-{i}"')
+        # 目的 IP
+        for i, _ in enumerate(p.get("dst_ips", [])):
+            cmds.append(f'destination-ip "{p["rule_name"]}-dst-{i}"')
+        # 服务（每个端口一个 object-group service，已由 _gen_service_objects 创建）
+        for port in p.get("ports", []):
+            if port.startswith("UDP:"):
+                port_v = port.split(":", 1)[1]
+                cmds.append(f'service "UDP-{port_v}"')
+            else:
+                cmds.append(f'service "TCP-{port}"')
+        # 时间
+        vu = p.get("valid_until", "")
+        if vu and "长期" not in vu:
+            cmds.append(f'time-range "{p["rule_name"]}-sched"')
+        # 动作
+        action = p.get("action", "permit")
+        cmds.append(f"action {action if action in ('permit', 'deny') else 'pass'}")
+        return cmds
 
     def _port_key(self, p: str) -> tuple:
         if p.startswith("UDP:"):

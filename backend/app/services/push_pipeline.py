@@ -39,6 +39,8 @@ from app.models import (
     Policy,
     PushedPolicyItem,
     PushedPolicySnapshot,
+    PushLog,
+    PushLogLevel,
     PushMode,
     PushSnapshotStatus,
 )
@@ -97,6 +99,8 @@ class PushPipeline:
         self.match_results: List[MatchResult] = []
         self.push_results: List[PushProgress] = []
         self._start_time: Optional[float] = None
+        # 实时日志: 进程内 seq 计数器（snapshot 生命周期内自增）
+        self._log_seq: int = 0
 
     # ============================================================
     # 公开 API
@@ -215,7 +219,7 @@ class PushPipeline:
             self._emit("done", f"推送完成（{status.value}），{elapsed}ms", {
                 "status": status.value, "elapsed_ms": elapsed,
                 "commands": len(all_commands), "failed": failed_count,
-            })
+            }, level="success" if failed_count == 0 else "warning")
 
             return {
                 "success": True,
@@ -236,7 +240,7 @@ class PushPipeline:
                     PushSnapshotStatus.failed, {},
                     error_log=f"{e}\n\n{tb}",
                 )
-            self._emit("error", f"推送失败: {e}", {"error": str(e), "traceback": tb})
+            self._emit("error", f"推送失败: {e}", {"error": str(e), "traceback": tb}, level="error")
             return {
                 "success": False,
                 "snapshot_id": self.snapshot.id if self.snapshot else None,
@@ -439,11 +443,34 @@ class PushPipeline:
             "seq": progress.seq, "success": progress.success, "elapsed_ms": progress.elapsed_ms,
         })
 
-    def _emit(self, stage: str, message: str, data: Optional[dict] = None):
-        """发进度事件"""
+    def _emit(self, stage: str, message: str, data: Optional[dict] = None, level: str = "info"):
+        """发进度事件: 写 DB push_logs（前端轮询拿）+ log + 回调
+
+        level: info / success / warning / error
+        """
+        # 1) callback (外部注入)
         if self.progress_callback:
             try:
                 self.progress_callback(stage, message, data or {})
             except Exception:
                 pass
+        # 2) logger
         logger.info(f"[push {self.snapshot.id if self.snapshot else '?'}] [{stage}] {message}")
+        # 3) 写 DB (snapshot 已建之后)
+        if self.snapshot is not None:
+            self._log_seq += 1
+            try:
+                log = PushLog(
+                    snapshot_id=self.snapshot.id,
+                    seq=self._log_seq,
+                    stage=stage,
+                    level=PushLogLevel(level) if level in {l.value for l in PushLogLevel} else PushLogLevel.info,
+                    message=message[:1000],
+                    data_json=json.dumps(data, ensure_ascii=False, default=str) if data else None,
+                )
+                self.db.add(log)
+                self.db.commit()
+            except Exception as e:
+                # 写日志失败不能影响流水线
+                logger.warning(f"写 push_log 失败: {e}")
+                self.db.rollback()

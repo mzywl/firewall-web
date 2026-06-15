@@ -28,6 +28,7 @@ from app.models import (
     Policy,
     PushedPolicyItem,
     PushedPolicySnapshot,
+    PushLog,
     PushSnapshotStatus,
 )
 from app.services.firewall_clients.registry import (
@@ -230,6 +231,50 @@ def get_snapshot(snapshot_id: int, db: Session = Depends(get_db)):
         "has_fetched_snapshot": bool(
             snap.fetched_addresses_json or snap.fetched_policies_json
         ),
+    }
+
+
+@router.get("/snapshots/{snapshot_id}/logs")
+def get_snapshot_logs(
+    snapshot_id: int,
+    after_seq: int = Query(0, description="只返回 seq > after_seq 的日志（用于前端轮询拿增量）"),
+    limit: int = Query(200, le=1000),
+    db: Session = Depends(get_db),
+):
+    """查快照的实时日志（按 seq 升序）
+
+    前端轮询模式:
+      - 首次: GET /snapshots/{id}/logs 拿前 200 条
+      - 后续: GET /snapshots/{id}/logs?after_seq={最后一条 seq} 拿增量
+      - 间隔 1.5 秒
+    """
+    snap = db.query(PushedPolicySnapshot).filter(
+        PushedPolicySnapshot.id == snapshot_id
+    ).first()
+    if not snap:
+        raise HTTPException(status_code=404, detail="快照不存在")
+    q = db.query(PushLog).filter(
+        PushLog.snapshot_id == snapshot_id,
+        PushLog.seq > after_seq,
+    ).order_by(PushLog.seq.asc()).limit(limit)
+    logs = q.all()
+    return {
+        "snapshot_id": snapshot_id,
+        "snapshot_status": snap.status.value if hasattr(snap.status, "value") else str(snap.status),
+        "total": db.query(PushLog).filter(PushLog.snapshot_id == snapshot_id).count(),
+        "after_seq": after_seq,
+        "logs": [
+            {
+                "id": lg.id,
+                "seq": lg.seq,
+                "stage": lg.stage,
+                "level": lg.level.value if hasattr(lg.level, "value") else str(lg.level),
+                "message": lg.message,
+                "data": json.loads(lg.data_json) if lg.data_json else None,
+                "created_at": lg.created_at.isoformat() if lg.created_at else None,
+            }
+            for lg in logs
+        ],
     }
 
 

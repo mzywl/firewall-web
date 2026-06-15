@@ -107,13 +107,15 @@ class SangforClient(FirewallClient):
     ) -> List[str]:
         cmds: List[str] = []
         cmds.append("config terminal")
-        # 1) 地址
+        # 1) 地址（个体）
         for p in new_policies:
             cmds.extend(self._gen_addresses(p["src_ips"] + p["dst_ips"], existing_addresses))
         # 2) 服务
         for p in new_policies:
             cmds.extend(self._gen_services(p["ports"], existing_services))
-        # 3) 策略（先建初始 + 追加各 IP/服务/时间）
+        # 3) 地址组（每条策略 src / dst 各一组，policy 引用组）
+        cmds.extend(self._gen_addrgrp(new_policies, existing_addresses))
+        # 4) 策略（引用 group 而非个体 IP）
         for p in new_policies:
             cmds.extend(self._gen_policy(p, existing_schedules))
         cmds.append("end")
@@ -170,24 +172,58 @@ class SangforClient(FirewallClient):
                 cmds.append("exit")
         return cmds
 
+    def _gen_addrgrp(self, policies, existing: List[AddressObject]) -> List[str]:
+        """为每条策略建 src / dst 两个地址组，成员为该策略的 IP 列表
+
+        Sangfor 的 address group 语法: object-group network address "name"
+          network address member "addr-X"
+
+        重要：member 必须引用 _gen_addresses 实际建出来的对象名：
+          - 已存在的 IP（existing.value 命中）→ 直接用 existing.name
+          - 新 IP → "addr-{ip}"
+        """
+        # 建立 IP → 对象名映射
+        existing_values = {a.value: a.name for a in existing if a.value}
+        ip_to_obj = {}  # ip -> obj name
+        all_ips = set()
+        for p in policies:
+            all_ips.update(p["src_ips"])
+            all_ips.update(p["dst_ips"])
+        for ip in all_ips:
+            if ip in existing_values:
+                ip_to_obj[ip] = existing_values[ip]
+            else:
+                ip_to_obj[ip] = f"addr-{ip}"
+
+        cmds = []
+        for p in policies:
+            if p["src_ips"]:
+                cmds.append(f'object-group network address "{p["rule_name"]}-src-group"')
+                for ip in p["src_ips"]:
+                    cmds.append(f'network address member "{ip_to_obj[ip]}"')
+                cmds.append("exit")
+            if p["dst_ips"]:
+                cmds.append(f'object-group network address "{p["rule_name"]}-dst-group"')
+                for ip in p["dst_ips"]:
+                    cmds.append(f'network address member "{ip_to_obj[ip]}"')
+                cmds.append("exit")
+        return cmds
+
     def _gen_policy(self, p: Dict[str, Any], existing_schedules: List) -> List[str]:
         name = p["rule_name"]
         cmds = []
-        # 初始策略
-        first_src = f'"addr-{p["src_ips"][0]}"' if p["src_ips"] else '"any"'
-        first_dst = f'"addr-{p["dst_ips"][0]}"' if p["dst_ips"] else '"any"'
+        # 引用地址组（而不是个体 IP）
+        src_grp = f'"{name}-src-group"' if p["src_ips"] else '"any"'
+        dst_grp = f'"{name}-dst-group"' if p["dst_ips"] else '"any"'
         first_svc = f'"TCP-{p["ports"][0]}"' if p["ports"] and not p["ports"][0].startswith("UDP:") else \
                     f'"UDP-{p["ports"][0].split(":")[1]}"' if p["ports"] else '"any"'
         cmds.append(
-            f'security policy "{name}" sip {first_src} dip {first_dst} '
-            f'szone "any" dzone "any" service {first_svc} action permit enable'
+            f'security policy "{name}" sip {src_grp} dip {dst_grp} '
+            f'szone "{p.get("src_zone", "any")}" dzone "{p.get("dst_zone", "any")}" '
+            f'service {first_svc} action permit enable'
         )
         cmds.append(f'security policy "{name}" log enable')
-        # 追加其余
-        for ip in p["src_ips"][1:]:
-            cmds.append(f'security policy "{name}" append sip "addr-{ip}"')
-        for ip in p["dst_ips"][1:]:
-            cmds.append(f'security policy "{name}" append dip "addr-{ip}"')
+        # 追加其余端口（多端口情况）
         for port in p["ports"][1:]:
             obj = f'"UDP-{port.split(":")[1]}"' if port.startswith("UDP:") else f'"TCP-{port}"'
             cmds.append(f'security policy "{name}" append service {obj}')

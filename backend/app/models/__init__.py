@@ -313,3 +313,38 @@ class PushedPolicyItem(Base):
 
     # 关联
     snapshot = relationship("PushedPolicySnapshot", back_populates="items")
+
+
+class PushLogLevel(str, enum.Enum):
+    """推送日志级别"""
+    info = "info"
+    success = "success"
+    warning = "warning"
+    error = "error"
+
+
+class PushLog(Base):
+    """推送实时日志（流水线每一步 emit 一行）
+
+    用途：前端轮询拿，~1.5s 延迟即可视；持久化到 DB 便于故障排查。
+    """
+    __tablename__ = "push_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    snapshot_id = Column(Integer, ForeignKey("pushed_policy_snapshots.id"), nullable=False, index=True, comment="所属快照ID")
+    seq = Column(Integer, nullable=False, comment="递增序号（同 snapshot 内从 1 开始）")
+    stage = Column(String(50), nullable=False, comment="阶段: start/load/connect/snapshot/fetch/parse/match/..."  )
+    level = Column(Enum(PushLogLevel), default=PushLogLevel.info, comment="日志级别")
+    message = Column(String(1000), nullable=False, comment="日志消息")
+    data_json = Column(Text, comment="附加数据 JSON")
+    created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
+
+    # 关联
+    snapshot = relationship("PushedPolicySnapshot", back_populates="logs")
+
+
+# 给 snapshot 加 logs 关系
+PushedPolicySnapshot.logs = relationship(
+    "PushLog", back_populates="snapshot",
+    cascade="all, delete-orphan", order_by="PushLog.seq",
+)
