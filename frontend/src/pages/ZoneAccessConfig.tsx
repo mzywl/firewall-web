@@ -19,7 +19,7 @@ interface SavedConfig {
   dest_zone: string;
   firewall_id: number;
   firewall_name: string;
-  nat_type: string | null;
+  // nat_type 字段已删除：项目不再分析 DNAT
   created_at: string;
   updated_at: string;
 }
@@ -29,7 +29,7 @@ interface AnalysisResult {
   dest_zone: string;
   is_same_zone: boolean;
   need_nat: boolean;
-  nat_type: string | null;
+  // nat_type 字段已删除：项目不再分析 DNAT
   recommended_firewall: {
     id: number;
     name: string;
@@ -47,7 +47,7 @@ export default function ZoneAccessConfig() {
   const [sourceZone, setSourceZone] = useState('');
   const [destZone, setDestZone] = useState('');
   const [selectedFirewall, setSelectedFirewall] = useState<number | null>(null);
-  const [natType, setNatType] = useState<string>('');
+  // natType 状态已删除：项目不再分析 DNAT
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [editingConfigId, setEditingConfigId] = useState<number | null>(null);
@@ -82,7 +82,6 @@ export default function ZoneAccessConfig() {
     setSourceZone(config.source_zone);
     setDestZone(config.dest_zone);
     setSelectedFirewall(config.firewall_id);
-    setNatType(config.nat_type || '');
     setEditingConfigId(config.id);
     // 滚动到表单
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -129,11 +128,7 @@ export default function ZoneAccessConfig() {
       if (data.recommended_firewall) {
         setSelectedFirewall(data.recommended_firewall.id);
       }
-
-      // 自动设置NAT类型
-      if (data.nat_type) {
-        setNatType(data.nat_type);
-      }
+      // 自动设置NAT类型逻辑已删除：项目不再分析 DNAT
     } catch (error) {
       console.error('分析失败:', error);
       alert('分析失败');
@@ -226,11 +221,11 @@ export default function ZoneAccessConfig() {
                 <div className="space-y-2">
                   <p className="text-blue-700 font-semibold">🔄 跨区域访问</p>
                   <p className="text-sm text-blue-600">
-                    源区域和目的区域不同，需要配置NAT转换
+                    源区域和目的区域不同，需要配置 SNAT 转换
                   </p>
                   {analysisResult.need_nat && (
                     <p className="text-sm text-blue-600">
-                      推荐NAT类型：<span className="font-semibold">{analysisResult.nat_type}</span>
+                      推荐 NAT 类型：<span className="font-semibold">SNAT</span>
                     </p>
                   )}
                 </div>
@@ -264,22 +259,7 @@ export default function ZoneAccessConfig() {
                   ))}
                 </select>
               </div>
-
-              {!analysisResult.is_same_zone && (
-                <div>
-                  <label className="block text-sm font-medium mb-2">NAT类型</label>
-                  <select
-                    value={natType}
-                    onChange={(e) => setNatType(e.target.value)}
-                    className="w-full px-3 py-2 border rounded-md"
-                  >
-                    <option value="">无需NAT</option>
-                    <option value="SNAT">SNAT（源地址转换）</option>
-                    <option value="DNAT">DNAT（目的地址转换）</option>
-                    <option value="BOTH">双向NAT</option>
-                  </select>
-                </div>
-              )}
+              {/* NAT类型选择器已删除：项目不再分析 DNAT */}
             </CardContent>
           </Card>
 
@@ -327,7 +307,6 @@ export default function ZoneAccessConfig() {
                 setSourceZone('');
                 setDestZone('');
                 setSelectedFirewall(null);
-                setNatType('');
                 setAnalysisResult(null);
               }}
             >
@@ -347,22 +326,21 @@ export default function ZoneAccessConfig() {
                     body: JSON.stringify({
                       source_zone: sourceZone,
                       dest_zone: destZone,
-                      firewall_id: selectedFirewall,
-                      nat_type: natType || null
+                      firewall_id: selectedFirewall
+                      // nat_type 字段已删除：项目不再分析 DNAT
                     })
                   });
 
                   const data = await response.json();
                   alert(data.message || '配置已保存');
-                  
+
                   // 重新加载配置列表
                   loadSavedConfigs();
-                  
+
                   // 重置表单
                   setSourceZone('');
                   setDestZone('');
                   setSelectedFirewall(null);
-                  setNatType('');
                   setAnalysisResult(null);
                   setEditingConfigId(null);
                 } catch (error) {
@@ -395,7 +373,7 @@ export default function ZoneAccessConfig() {
                     <th className="px-4 py-2 text-left">源区域</th>
                     <th className="px-4 py-2 text-left">目的区域</th>
                     <th className="px-4 py-2 text-left">防火墙</th>
-                    <th className="px-4 py-2 text-left">NAT类型</th>
+                    <th className="px-4 py-2 text-left">访问类型</th>
                     <th className="px-4 py-2 text-left">更新时间</th>
                     <th className="px-4 py-2 text-center">操作</th>
                   </tr>
@@ -407,13 +385,9 @@ export default function ZoneAccessConfig() {
                       <td className="px-4 py-2">{config.dest_zone}</td>
                       <td className="px-4 py-2">{config.firewall_name}</td>
                       <td className="px-4 py-2">
-                        {config.nat_type ? (
-                          <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs">
-                            {config.nat_type}
-                          </span>
-                        ) : (
-                          <span className="text-muted-foreground">无需NAT</span>
-                        )}
+                        <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs">
+                          跨区域（SNAT）
+                        </span>
                       </td>
                       <td className="px-4 py-2 text-muted-foreground">
                         {new Date(config.updated_at).toLocaleString('zh-CN')}

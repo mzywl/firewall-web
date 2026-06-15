@@ -40,11 +40,10 @@ interface FormData {
   external_protected_ips: string;
   is_zone_boundary: number;
 
-  // NAT配置（仅当 is_zone_boundary=1 时由 UI 显示和填写）
+  // SNAT 地址池（仅当 is_zone_boundary=1 时由 UI 显示和填写）
+  // 项目已决定不再分析 DNAT，所以只保留 SNAT 相关字段
   outbound_snat_pool: string;
-  inbound_dnat_pool: string;
   inbound_snat_pool: string;
-  outbound_dnat_pool: string;
   
   // 推送配置
   auto_push: number;
@@ -78,9 +77,7 @@ export default function FirewallForm() {
     is_zone_boundary: 0,
 
     outbound_snat_pool: '',
-    inbound_dnat_pool: '',
     inbound_snat_pool: '',
-    outbound_dnat_pool: '',
     
     auto_push: 1,
     allow_same_firewall_push: 0,
@@ -483,7 +480,7 @@ export default function FirewallForm() {
 
         {formData.is_zone_boundary === 1 && (
         <Card className="p-6 mb-6">
-          <h2 className="text-xl font-semibold mb-4">NAT 配置（仅边界防火墙）</h2>
+          <h2 className="text-xl font-semibold mb-4">SNAT 地址池配置（仅边界防火墙）</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium mb-1">出向SNAT地址段/地址池</label>
@@ -496,32 +493,12 @@ export default function FirewallForm() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium mb-1">入向DNAT地址段/地址池</label>
-              <textarea
-                className="w-full px-3 py-2 border rounded-md font-mono text-sm"
-                rows={3}
-                value={formData.inbound_dnat_pool}
-                onChange={(e) => setFormData({ ...formData, inbound_dnat_pool: e.target.value })}
-                placeholder="地址段或地址池名称"
-              />
-            </div>
-            <div>
               <label className="block text-sm font-medium mb-1">入向SNAT地址段/地址池</label>
               <textarea
                 className="w-full px-3 py-2 border rounded-md font-mono text-sm"
                 rows={3}
                 value={formData.inbound_snat_pool}
                 onChange={(e) => setFormData({ ...formData, inbound_snat_pool: e.target.value })}
-                placeholder="地址段或地址池名称"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">出向DNAT地址段/地址池</label>
-              <textarea
-                className="w-full px-3 py-2 border rounded-md font-mono text-sm"
-                rows={3}
-                value={formData.outbound_dnat_pool}
-                onChange={(e) => setFormData({ ...formData, outbound_dnat_pool: e.target.value })}
                 placeholder="地址段或地址池名称"
               />
             </div>

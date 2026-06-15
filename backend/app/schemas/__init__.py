@@ -114,11 +114,10 @@ class FirewallBase(BaseModel):
     # supported_policy_types 已废弃（UI 隐藏），保留字段以兼容旧数据
     supported_policy_types: Optional[List[str]] = None
 
-    # NAT配置（仅当 is_zone_boundary=1 时由 UI 显示和填写）
+    # SNAT 地址池（仅当 is_zone_boundary=1 时由 UI 显示和填写）
+    # 项目已决定不再分析 DNAT，所以只保留 SNAT 相关字段
     outbound_snat_pool: Optional[str] = None
-    inbound_dnat_pool: Optional[str] = None
     inbound_snat_pool: Optional[str] = None
-    outbound_dnat_pool: Optional[str] = None
     
     # 推送配置
     auto_push: int = Field(default=1)
@@ -163,9 +162,7 @@ class FirewallUpdate(BaseModel):
     supported_policy_types: Optional[List[str]] = None
     
     outbound_snat_pool: Optional[str] = None
-    inbound_dnat_pool: Optional[str] = None
     inbound_snat_pool: Optional[str] = None
-    outbound_dnat_pool: Optional[str] = None
     
     auto_push: Optional[int] = None
     push_contact: Optional[str] = None

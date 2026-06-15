@@ -1,23 +1,28 @@
 """
-NAT转换分析模块
+NAT转换分析模块（SNAT-only 版本）
+
+项目决定: 取消 DNAT 分析。跨区域访问仅按 SNAT 处理。
 
 判断流程（按用户业务语义）：
   1. 通过 firewall 的 protected_ips 段判断 src/dst 属于 external/internal
-  2. firewall 上是否勾了 NAT 池（任一非空）
-  3. 查 zone_access_configs 表，按 firewall 自身的 zone 名匹配
-  4. 命中且 nat_type 非空 → 直接用配置
-     命中但 nat_type 为空 → 提示并 fallback
-     未命中 → fallback 到 IP 段判定（外部→内部=DNAT, 内部→外部=SNAT）
+  2. 同区域：不需要 NAT
+  3. 跨区域：默认需要 SNAT（源 IP 转换）
+  4. SNAT 地址池:
+       - 源在 internal 侧（出向）→ 用 outbound_snat_pool
+       - 源在 external 侧（入向）→ 用 inbound_snat_pool
+     任一未配置 → 警告。
+  5. 项目已不再分析 DNAT, 故 nat_type 只会是 'SNAT' 或 None;
+     None 的场景仅在防火墙 SNAT 池完全未配置时返回, 由人工补配。
 """
 from typing import Optional, Dict, List
 import ipaddress
 from sqlalchemy.orm import Session
-from app.models import Firewall, ZoneAccessConfig
+from app.models import Firewall
 
 
 class NATAnalyzer:
     """
-    NAT转换分析器
+    NAT转换分析器（SNAT-only）
     """
 
     def __init__(self, db: Session):
@@ -25,14 +30,14 @@ class NATAnalyzer:
 
     def analyze_policy(self, source_ip: str, dest_ip: str, firewall: Firewall) -> Dict:
         """
-        分析策略是否需要NAT转换
+        分析策略是否需要 NAT 转换
 
         返回格式：
         {
             "need_nat": bool,
-            "nat_type": "SNAT" | "DNAT" | "BOTH" | None,
+            "nat_type": "SNAT" | None,
             "snat_address": str | None,
-            "dnat_address": str | None,
+            "dnat_address": None,           # 保留字段以兼容调用方, 永远为 None
             "source_zone": str | None,
             "dest_zone": str | None,
             "warnings": List[str]
@@ -42,7 +47,7 @@ class NATAnalyzer:
             "need_nat": False,
             "nat_type": None,
             "snat_address": None,
-            "dnat_address": None,
+            "dnat_address": None,           # 项目已取消 DNAT, 保留字段恒为 None
             "source_zone": None,
             "dest_zone": None,
             "warnings": []
@@ -65,85 +70,32 @@ class NATAnalyzer:
             if source_zone == dest_zone:
                 return result
 
-            # 跨区域：需要 NAT
+            # 跨区域：仅按 SNAT 处理
             result["need_nat"] = True
+            result["nat_type"] = "SNAT"
 
-            # 步骤 3: 查 zone_access_configs 表（业务视角优先）
-            # 用 firewall 自身的 zone 名（external_zone_name + region）
-            # 去匹配 configs.source_zone / configs.dest_zone
-            # 注意：zone_access_configs 表本身就是"业务上明确指定 NAT 类型"的强信号，
-            #       只要表中配了该 firewall + (source_zone, dest_zone) → 立即用配置，
-            #       不被 firewall 是否配 NAT 池字段 gate（NAT 池字段决定具体地址，
-            #       但不影响 NAT 类型判定）。
-            # 注：local_zone_name 是"内网 zone 名"（业务名，可被改），不是"归属大区"；
-            #     region 才是 firewall 归属的大区（用于查表更稳定）。
-            ext_zone = firewall.external_zone_name
-            local_zone = firewall.region  # 归属大区
-
-            if source_zone == "external" and dest_zone == "internal":
-                cfg = self.db.query(ZoneAccessConfig).filter(
-                    ZoneAccessConfig.firewall_id == firewall.id,
-                    ZoneAccessConfig.source_zone == ext_zone,
-                    ZoneAccessConfig.dest_zone == local_zone,
-                ).first()
-            elif source_zone == "internal" and dest_zone == "external":
-                cfg = self.db.query(ZoneAccessConfig).filter(
-                    ZoneAccessConfig.firewall_id == firewall.id,
-                    ZoneAccessConfig.source_zone == local_zone,
-                    ZoneAccessConfig.dest_zone == ext_zone,
-                ).first()
+            # 源在 internal 侧 → 出向（outbound_snat_pool）
+            # 源在 external 侧 → 入向（inbound_snat_pool）
+            if source_zone == "internal" and dest_zone == "external":
+                result["snat_address"] = firewall.outbound_snat_pool
+                if not result["snat_address"]:
+                    result["warnings"].append("出向SNAT地址池未配置")
+            elif source_zone == "external" and dest_zone == "internal":
+                result["snat_address"] = firewall.inbound_snat_pool
+                if not result["snat_address"]:
+                    result["warnings"].append("入向SNAT地址池未配置")
             else:
-                cfg = None
+                # 源或目的不在 internal/external 分类内（理论上 _get_zone 不会返回其他值）
+                result["warnings"].append(f"未知区域组合: source={source_zone}, dest={dest_zone}")
+                result["snat_address"] = firewall.outbound_snat_pool
+                if not result["snat_address"]:
+                    result["warnings"].append("出向SNAT地址池未配置")
 
-            if cfg and cfg.nat_type:
-                # 步骤 4: 命中且配了 nat_type → 直接用配置
-                return self._build_nat_result(result, cfg.nat_type, firewall)
-
-            if cfg is not None:
-                # 配了记录但没指定 nat_type → 提示后 fallback
-                result["warnings"].append(
-                    f"区域访问配置已配(source={cfg.source_zone}, dest={cfg.dest_zone})但未指定 nat_type, fallback 到默认判定"
-                )
-
-            # 步骤 5: fallback — 按网络方向默认判定
-            return self._fallback_by_network_direction(result, firewall)
+            return result
 
         except Exception as e:
             result["warnings"].append(f"NAT分析失败: {str(e)}")
             return result
-
-    def _build_nat_result(self, result: Dict, nat_type: str, firewall: Firewall) -> Dict:
-        """根据配置/默认的 nat_type 填充结果（地址池/警告）"""
-        result["nat_type"] = nat_type
-
-        if nat_type == "SNAT":
-            # 源 IP 转换：源在 internal 侧，源 IP 转成 outbound_snat_pool
-            result["snat_address"] = firewall.outbound_snat_pool
-            if not result["snat_address"]:
-                result["warnings"].append("出向SNAT地址池未配置")
-        elif nat_type == "DNAT":
-            # 目的 IP 转换：目的在 internal 侧，目的 IP 转成 inbound_dnat_pool
-            result["dnat_address"] = firewall.inbound_dnat_pool
-            if not result["dnat_address"]:
-                result["warnings"].append("入向DNAT地址池未配置")
-        elif nat_type == "BOTH":
-            result["snat_address"] = firewall.outbound_snat_pool
-            result["dnat_address"] = firewall.inbound_dnat_pool
-            if not result["snat_address"]:
-                result["warnings"].append("SNAT地址池未配置")
-            if not result["dnat_address"]:
-                result["warnings"].append("DNAT地址池未配置")
-
-        return result
-
-    def _fallback_by_network_direction(self, result: Dict, firewall: Firewall) -> Dict:
-        """Fallback: 按网络方向判定 NAT 类型（外部→内部=DNAT, 内部→外部=SNAT）"""
-        if result["source_zone"] == "internal" and result["dest_zone"] == "external":
-            return self._build_nat_result(result, "SNAT", firewall)
-        elif result["source_zone"] == "external" and result["dest_zone"] == "internal":
-            return self._build_nat_result(result, "DNAT", firewall)
-        else:
-            return self._build_nat_result(result, "BOTH", firewall)
 
     def _get_zone(self, ip: str, firewall: Firewall) -> Optional[str]:
         """

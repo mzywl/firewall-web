@@ -26,7 +26,6 @@ def setup_test_data(db: Session):
         internal_protected_ips="10.0.0.0/8\n172.16.0.0/12",
         external_protected_ips="192.168.0.0/16",
         outbound_snat_pool="200.1.1.1-200.1.1.10",
-        inbound_dnat_pool="200.2.2.1-200.2.2.10",
         auto_push=1,
         push_contact="测试管理员",
         is_active=1
