@@ -48,6 +48,19 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
+    # SPA 入口：永不缓存（dist 升级时浏览器能立即拿到新 hash）
+    location = / {
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
+        try_files /index.html =404;
+    }
+    location = /index.html {
+        add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        add_header Pragma "no-cache" always;
+        add_header Expires "0" always;
+    }
+
     # 静态资源（vite build 出的 assets 带 hash，可长缓存）
     location /assets/ {
         expires 1y;
