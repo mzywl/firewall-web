@@ -24,12 +24,14 @@ RUN npm config set registry https://registry.npmmirror.com && \
 COPY . .
 
 # 编译期环境变量（base 路径，可选）
+# 重要：VITE_API_BASE_URL 和 VITE_SOCKET_URL 故意不设默认 ENV，
+#       让 import.meta.env.X 在编译时是 undefined，
+#       配合源码里的 `?? '/api'` / `?? ''` fallback 走预期分支。
+#       如果设成空字符串 ENV，`'' ?? X` 会求值为 `''`（不走 fallback），
+#       导致 baseURL 是空字符串 + 路径 /firewalls 拼成 /firewalls → nginx SPA fallback → 200 HTML → .filter() 崩。
 ARG VITE_BASE=/
-ARG VITE_API_BASE_URL=""
-ARG VITE_SOCKET_URL=""
-ENV VITE_BASE=$VITE_BASE \
-    VITE_API_BASE_URL=$VITE_API_BASE_URL \
-    VITE_SOCKET_URL=$VITE_SOCKET_URL
+ENV VITE_BASE=$VITE_BASE
+# VITE_API_BASE_URL 和 VITE_SOCKET_URL 由用户在 docker-compose.yml 或 .env.production 显式设置时才会被注入
 
 # tsc 类型检查 + vite build
 RUN npm run build

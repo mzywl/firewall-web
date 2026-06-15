@@ -43,11 +43,13 @@ export default function FirewallManagement() {
       const params = new URLSearchParams();
       if (filterStatus) params.append('status', filterStatus);
       if (filterType) params.append('type', filterType);
-      
+
       const response = await axios.get(`${API_BASE_URL}/firewalls?${params.toString()}`);
-      setFirewalls(response.data);
+      // 防御：API 返非数组（HTML fallback、null、{}）时显示空列表，不崩
+      setFirewalls(Array.isArray(response.data) ? response.data : []);
     } catch (error) {
       console.error('获取防火墙列表失败:', error);
+      setFirewalls([]);
     } finally {
       setLoading(false);
     }
