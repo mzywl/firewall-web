@@ -1,7 +1,9 @@
 import axios from 'axios';
 import type { Order, Policy, PolicyVersion, PushStatus } from '../types';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+// 同源：空 baseURL，nginx 同域名反代 /api
+// 如需直连后端调试，可设 VITE_API_BASE_URL=http://localhost:18000
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
 
 const api = axios.create({
   baseURL: API_BASE_URL,

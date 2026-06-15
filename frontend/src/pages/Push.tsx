@@ -23,6 +23,7 @@ import {
   useTestConnection,
   useSnapshot,
   useSnapshotLogs,
+  usePolicies,
 } from '../hooks/useApi';
 import type { PushMode, PushLogsResponse } from '../lib/api';
 
@@ -41,6 +42,7 @@ export const Push = () => {
   } | null>(null);
 
   const { data: order } = useOrder(Number(orderId));
+  const { data: policies } = usePolicies(Number(orderId), 'user_modified');
   const { data: firewalls, isLoading: loadingFws } = useFirewalls();
   const startPushMutation = useStartPushV2(Number(orderId));
   const testConnMutation = useTestConnection();
@@ -69,7 +71,7 @@ export const Push = () => {
       alert('请先选择目标防火墙');
       return;
     }
-    if (!order?.policies || order.policies.length === 0) {
+    if (!policies || policies.length === 0) {
       alert('工单没有可推送的策略');
       return;
     }
@@ -120,7 +122,7 @@ export const Push = () => {
   };
 
   // 进度（用 snapshot 统计 + 实时日志数量估算）
-  const total = snapshot?.total_policies ?? order?.policies?.length ?? 0;
+  const total = snapshot?.total_policies ?? policies?.length ?? 0;
   const success = snapshot?.new_policies ?? 0;
   const failed = snapshot?.failed_policies ?? 0;
   const reused = snapshot?.reused_policies ?? 0;

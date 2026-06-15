@@ -1,3 +1,12 @@
+# ============================================================
+# firewall-web 生产部署
+#   - 浏览器只访问 80 端口（nginx 统一入口）
+#   - /          → frontend 容器（多阶段 build，nginx 服务静态）
+#   - /api/      → backend 容器（uvicorn）
+#   - /socket.io/→ backend 容器（WebSocket 升级）
+#   零跨域，零 CORS 配置
+# ============================================================
+
 services:
   postgres:
     image: postgres:15
@@ -6,8 +15,10 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: firewall_db
-    ports:
-      - "5432:5432"
+    # 生产环境不直接暴露 5432 到 host（容器间访问）
+    # 如需从 host 调试：取消下面这行
+    # ports:
+    #   - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -15,65 +26,78 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
     container_name: firewall-redis
-    ports:
-      - "6379:6379"
+    # ports:
+    #   - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
+    restart: unless-stopped
 
   backend:
     build: ./backend
     container_name: firewall-backend
-    ports:
-      - "18000:8000"
-    volumes:
-      - ./backend:/app
+    # 不再暴露端口到 host（仅容器网络内被 nginx 访问）
+    expose:
+      - "8000"
     environment:
       - PYTHONUNBUFFERED=1
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/firewall_db
       - REDIS_URL=redis://redis:6379/0
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    # 生产：去掉 --reload 提性能
+    # uvicorn 的 --proxy-headers 自动识别 X-Forwarded-Proto / X-Forwarded-For
+    # --forwarded-allow-ips 信任的反代 IP（这里允许所有，因为 nginx 在容器网络内）
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--proxy-headers"]
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-
-  celery:
-    build: ./backend
-    container_name: firewall-celery
-    volumes:
-      - ./backend:/app
-    environment:
-      - PYTHONUNBUFFERED=1
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/firewall_db
-      - REDIS_URL=redis://redis:6379/0
-    command: celery -A app.core.celery_app worker --loglevel=info
-    depends_on:
-      - postgres
-      - redis
-      - backend
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
 
   frontend:
     build: ./frontend
     container_name: firewall-frontend
-    ports:
-      - "5173:5173"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-    environment:
-      - NODE_ENV=development
-      - VITE_API_URL=http://localhost:18000
-    command: npm run dev -- --host 0.0.0.0
+    expose:
+      - "80"
     depends_on:
       - backend
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost/"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+  nginx:
+    build: ./nginx
+    container_name: firewall-nginx
+    ports:
+      - "80:80"
+    # 生产可加 443：- "443:443"
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
 
 volumes:
   postgres_data:

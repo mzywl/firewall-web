@@ -1,7 +1,9 @@
 import { io, Socket } from 'socket.io-client';
 import type { PushProgress, PushLog, PushStatusUpdate } from '../types';
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:8000';
+// 同源：空 URL，nginx 同域名反代 /socket.io
+// 如需直连后端调试，可设 VITE_SOCKET_URL=http://localhost:18000
+const SOCKET_URL = import.meta.env.VITE_SOCKET_URL ?? '';
 
 class SocketManager {
   private socket: Socket | null = null;

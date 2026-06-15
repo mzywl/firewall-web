@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, AlertTriangle, CheckCircle, Info } from 'lucide-react';
+import { ArrowLeft, AlertTriangle, Info } from 'lucide-react';
 import { Button } from '../components/ui/Button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../components/ui/Card';
 
@@ -26,6 +26,8 @@ interface NATPolicy {
 
 interface Policy {
   id: number;
+  sequence?: number;
+  original_policy_id?: number;
   source_zone: string;
   source_ip: string;
   dest_zone: string;
@@ -61,8 +63,8 @@ interface PreviewData {
     status: string;
     created_at: string;
   };
-  firewalls: FirewallGroup[];
-  not_pushed_policies: Policy[];
+  firewall_groups: FirewallGroup[];
+  unmatched_policies: Policy[];
   warnings: string[];
   errors: string[];
 }
