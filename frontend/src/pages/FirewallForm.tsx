@@ -38,9 +38,9 @@ interface FormData {
   // 防护范围（分内部和外部）
   internal_protected_ips: string;
   external_protected_ips: string;
-  supported_policy_types: string[];
-  
-  // NAT配置
+  is_zone_boundary: number;
+
+  // NAT配置（仅当 is_zone_boundary=1 时由 UI 显示和填写）
   outbound_snat_pool: string;
   inbound_dnat_pool: string;
   inbound_snat_pool: string;
@@ -75,8 +75,8 @@ export default function FirewallForm() {
     
     internal_protected_ips: '',
     external_protected_ips: '',
-    supported_policy_types: [],
-    
+    is_zone_boundary: 0,
+
     outbound_snat_pool: '',
     inbound_dnat_pool: '',
     inbound_snat_pool: '',
@@ -104,7 +104,7 @@ export default function FirewallForm() {
       const data = response.data;
       setFormData({
         ...data,
-        supported_policy_types: data.supported_policy_types || [],
+        is_zone_boundary: data.is_zone_boundary ?? 0,
         connection_config: data.connection_config || {}
       });
     } catch (error) {
@@ -142,21 +142,6 @@ export default function FirewallForm() {
       alert('保存失败');
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handlePolicyTypeChange = (type: string) => {
-    const types = formData.supported_policy_types;
-    if (types.includes(type)) {
-      setFormData({
-        ...formData,
-        supported_policy_types: types.filter(t => t !== type)
-      });
-    } else {
-      setFormData({
-        ...formData,
-        supported_policy_types: [...types, type]
-      });
     }
   };
 
@@ -477,27 +462,28 @@ export default function FirewallForm() {
                 外部网络IP段，用于匹配策略目的IP
               </p>
             </div>
-            <div>
-              <label className="block text-sm font-medium mb-2">支持的策略类型</label>
-              <div className="flex flex-wrap gap-3">
-                {['ACL', 'NAT', '跨单位', '其他'].map(type => (
-                  <label key={type} className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={formData.supported_policy_types.includes(type)}
-                      onChange={() => handlePolicyTypeChange(type)}
-                      className="w-4 h-4"
-                    />
-                    <span>{type}</span>
-                  </label>
-                ))}
-              </div>
+            <div className="md:col-span-2">
+              <label className="flex items-center gap-2 cursor-pointer p-3 bg-amber-50 border border-amber-200 rounded-md">
+                <input
+                  type="checkbox"
+                  checked={formData.is_zone_boundary === 1}
+                  onChange={(e) => setFormData({ ...formData, is_zone_boundary: e.target.checked ? 1 : 0 })}
+                  className="w-4 h-4"
+                />
+                <div>
+                  <span className="text-sm font-medium">是否区域边界防火墙</span>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    勾选后下方会出现"默认入向/出向 SNAT 地址组名称"配置。仅跨区域流量需要 NAT 转换的边界防火墙需勾选。
+                  </p>
+                </div>
+              </label>
             </div>
           </div>
         </Card>
 
+        {formData.is_zone_boundary === 1 && (
         <Card className="p-6 mb-6">
-          <h2 className="text-xl font-semibold mb-4">NAT配置</h2>
+          <h2 className="text-xl font-semibold mb-4">NAT 配置（仅边界防火墙）</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium mb-1">出向SNAT地址段/地址池</label>
@@ -541,6 +527,7 @@ export default function FirewallForm() {
             </div>
           </div>
         </Card>
+        )}
 
         <Card className="p-6 mb-6">
           <h2 className="text-xl font-semibold mb-4">推送配置</h2>

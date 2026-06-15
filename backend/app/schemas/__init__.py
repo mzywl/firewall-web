@@ -110,9 +110,11 @@ class FirewallBase(BaseModel):
     # 防护范围（分内部和外部）
     internal_protected_ips: Optional[str] = None
     external_protected_ips: Optional[str] = None
+    is_zone_boundary: int = Field(default=0, description="是否区域边界防火墙(0:否, 1:是)；仅边界防火墙需配 NAT 地址池")
+    # supported_policy_types 已废弃（UI 隐藏），保留字段以兼容旧数据
     supported_policy_types: Optional[List[str]] = None
-    
-    # NAT配置
+
+    # NAT配置（仅当 is_zone_boundary=1 时由 UI 显示和填写）
     outbound_snat_pool: Optional[str] = None
     inbound_dnat_pool: Optional[str] = None
     inbound_snat_pool: Optional[str] = None
@@ -157,6 +159,7 @@ class FirewallUpdate(BaseModel):
     
     internal_protected_ips: Optional[str] = None
     external_protected_ips: Optional[str] = None
+    is_zone_boundary: Optional[int] = None
     supported_policy_types: Optional[List[str]] = None
     
     outbound_snat_pool: Optional[str] = None

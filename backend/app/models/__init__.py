@@ -112,9 +112,12 @@ class Firewall(Base):
     # 防护范围（分内部和外部）
     internal_protected_ips = Column(Text, comment="内部防护IP段，每行一个")
     external_protected_ips = Column(Text, comment="外部防护IP段，每行一个")
-    supported_policy_types = Column(JSON, comment="支持的策略类型数组")
-    
-    # NAT配置
+    # 是否区域边界防火墙：跨区域流量的 NAT 转换仅在这类防火墙上需要
+    is_zone_boundary = Column(Integer, default=0, comment="是否区域边界防火墙(0:否, 1:是)；仅边界防火墙需配 NAT 地址池")
+    # supported_policy_types 字段保留以兼容旧数据，UI 不再使用
+    supported_policy_types = Column(JSON, comment="支持的策略类型数组（已废弃，UI 隐藏）")
+
+    # NAT配置（仅当 is_zone_boundary=1 时由 UI 显示和填写）
     outbound_snat_pool = Column(Text, comment="出向SNAT地址段/地址池名称")
     inbound_dnat_pool = Column(Text, comment="入向DNAT地址段/地址池名称")
     inbound_snat_pool = Column(Text, comment="入向SNAT地址段/地址池名称")
