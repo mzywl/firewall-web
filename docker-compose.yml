@@ -60,9 +60,10 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8000/health"]
+      # python:3.11-slim 镜像精简到没 wget/curl，用 python 内置 urllib
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status == 200 else 1)"]
       interval: 10s
-      timeout: 3s
+      timeout: 5s
       retries: 3
       start_period: 20s
     restart: unless-stopped
@@ -75,7 +76,8 @@ services:
     depends_on:
       - backend
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O-", "http://localhost/"]
+      # 用 127.0.0.1 不用 localhost（alpine wget 走 IPv6 ::1，但 nginx 只 listen v4）
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1/"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -93,7 +95,7 @@ services:
       frontend:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O-", "http://localhost/healthz"]
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1/healthz"]
       interval: 10s
       timeout: 3s
       retries: 3

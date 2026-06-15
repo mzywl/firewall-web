@@ -6,7 +6,7 @@ from app.models import Firewall
 from app.schemas import FirewallCreate, FirewallUpdate, FirewallResponse
 import base64
 
-router = APIRouter(prefix="/firewalls", tags=["firewalls"])
+router = APIRouter(prefix="/api/firewalls", tags=["firewalls"])
 
 
 def encrypt_password(password: str) -> str:

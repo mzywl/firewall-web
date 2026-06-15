@@ -83,7 +83,7 @@ export const Preview = () => {
   const loadPreviewData = async () => {
     try {
       setLoading(true);
-      const response = await fetch(`http://localhost:8000/api/workorders/${orderId}/preview`);
+      const response = await fetch(`/api/workorders/${orderId}/preview`);
       if (!response.ok) {
         throw new Error('加载预览数据失败');
       }

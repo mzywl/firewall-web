@@ -70,5 +70,6 @@ async def broadcast_push_status(order_id: int, status: dict):
 
 def mount_socketio(app: FastAPI):
     """挂载 Socket.IO 到 FastAPI"""
-    app.mount('/socket.io', socket_app)
+    # 注意：要带 trailing slash（'/socket.io/'），否则客户端请求 /socket.io/?... 会 404
+    app.mount('/socket.io/', socket_app)
     return sio

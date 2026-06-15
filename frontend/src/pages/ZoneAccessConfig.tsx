@@ -59,7 +59,7 @@ export default function ZoneAccessConfig() {
 
   const loadFirewalls = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/zone-access/firewalls');
+      const response = await fetch('/api/zone-access/firewalls');
       const data = await response.json();
       setFirewalls(data.firewalls);
     } catch (error) {
@@ -70,7 +70,7 @@ export default function ZoneAccessConfig() {
 
   const loadSavedConfigs = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/zone-access/configs');
+      const response = await fetch('/api/zone-access/configs');
       const data = await response.json();
       setSavedConfigs(data.configs);
     } catch (error) {
@@ -94,7 +94,7 @@ export default function ZoneAccessConfig() {
     }
 
     try {
-      const response = await fetch(`http://localhost:8000/api/zone-access/configs/${configId}`, {
+      const response = await fetch(`/api/zone-access/configs/${configId}`, {
         method: 'DELETE'
       });
 
@@ -119,7 +119,7 @@ export default function ZoneAccessConfig() {
     setLoading(true);
     try {
       const response = await fetch(
-        `http://localhost:8000/api/zone-access/analyze?source_zone=${encodeURIComponent(sourceZone)}&dest_zone=${encodeURIComponent(destZone)}`,
+        `/api/zone-access/analyze?source_zone=${encodeURIComponent(sourceZone)}&dest_zone=${encodeURIComponent(destZone)}`,
         { method: 'POST' }
       );
       const data = await response.json();
@@ -341,7 +341,7 @@ export default function ZoneAccessConfig() {
                 }
 
                 try {
-                  const response = await fetch('http://localhost:8000/api/zone-access/save', {
+                  const response = await fetch('/api/zone-access/save', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
