@@ -69,14 +69,16 @@ class NATAnalyzer:
             result["need_nat"] = True
 
             # 步骤 3: 查 zone_access_configs 表（业务视角优先）
-            # 用 firewall 自身的 zone 名（external_zone_name / local_zone_name）
+            # 用 firewall 自身的 zone 名（external_zone_name + region）
             # 去匹配 configs.source_zone / configs.dest_zone
             # 注意：zone_access_configs 表本身就是"业务上明确指定 NAT 类型"的强信号，
             #       只要表中配了该 firewall + (source_zone, dest_zone) → 立即用配置，
             #       不被 firewall 是否配 NAT 池字段 gate（NAT 池字段决定具体地址，
             #       但不影响 NAT 类型判定）。
+            # 注：local_zone_name 是"内网 zone 名"（业务名，可被改），不是"归属大区"；
+            #     region 才是 firewall 归属的大区（用于查表更稳定）。
             ext_zone = firewall.external_zone_name
-            local_zone = firewall.local_zone_name or firewall.region
+            local_zone = firewall.region  # 归属大区
 
             if source_zone == "external" and dest_zone == "internal":
                 cfg = self.db.query(ZoneAccessConfig).filter(
