@@ -5,7 +5,6 @@ import { Button } from '../components/ui/Button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
 import { SyncScrollTable } from '../components/table/SyncScrollTable';
-import { VirtualTable } from '../components/table/VirtualTable';
 import { useOrder, usePolicies, useUpdatePolicies } from '../hooks/useApi';
 import type { Policy } from '../types';
 
@@ -217,13 +216,14 @@ export const Edit = () => {
               <CardTitle>第一次格式化（只读）</CardTitle>
               <CardDescription>标准化字段名 + 格式化IP/端口</CardDescription>
             </CardHeader>
-            <CardContent>
-              <VirtualTable
-                policies={formattedV1Policies || []}
-                editable={false}
-                loading={v1Loading}
-              />
-            </CardContent>
+          <CardContent>
+            <SyncScrollTable
+              mode="single"
+              policies={formattedV1Policies || []}
+              editable={false}
+              loading={v1Loading}
+            />
+          </CardContent>
           </Card>
 
           <Card>
@@ -231,14 +231,15 @@ export const Edit = () => {
               <CardTitle>第二次格式化（可编辑）</CardTitle>
               <CardDescription>删除示例策略 - 使用虚拟滚动优化性能</CardDescription>
             </CardHeader>
-            <CardContent>
-              <VirtualTable
-                policies={formattedV2Policies || []}
-                onUpdate={handleSave}
-                editable={true}
-                loading={v2Loading || updateMutation.isPending}
-              />
-            </CardContent>
+          <CardContent>
+            <SyncScrollTable
+              mode="single"
+              policies={formattedV2Policies || []}
+              editable={true}
+              onUpdate={handleSave}
+              loading={v2Loading || updateMutation.isPending}
+            />
+          </CardContent>
           </Card>
         </>
       )}
