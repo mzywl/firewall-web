@@ -11,13 +11,11 @@
   },
   "dependencies": {
     "@tanstack/react-query": "^5.90.21",
-    "@types/react-window": "^1.8.8",
     "axios": "^1.13.6",
     "lucide-react": "^0.577.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-router-dom": "^7.13.1",
-    "react-window": "^2.2.7",
     "socket.io-client": "^4.8.3",
     "zustand": "^5.0.11"
   },
