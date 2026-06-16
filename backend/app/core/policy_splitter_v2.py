@@ -153,10 +153,12 @@ class PolicySplitterV2:
         
         # 检查跨防火墙内部通信
         # 源在A内部，目的在B内部（A≠B）→ 不推送
+        # 修复:必须 src_fw 和 dst_fw 在同一 region 才算"跨防火墙内部通信"
+        # 否则 src_fw[生产区] 误吞 src IP + dst_fw[测试区] 命中 dst IP 会被误判
         for src_fw, src_internal in source_matches:
             if src_internal:
                 for dst_fw, dst_internal in dest_matches:
-                    if dst_internal and src_fw.id != dst_fw.id:
+                    if dst_internal and src_fw.id != dst_fw.id and src_fw.region == dst_fw.region:
                         # 跨防火墙内部通信，标记为特殊方向
                         result.append((src_fw, 'cross_internal'))
                         return result  # 这种情况不生成其他策略
