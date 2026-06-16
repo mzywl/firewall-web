@@ -14,7 +14,10 @@ class PolicySplitterV2:
     
     def __init__(self, db: Session):
         self.db = db
-        self.firewalls = db.query(Firewall).filter(Firewall.is_active == 1).all()
+        # 排序：边界防火墙(is_zone_boundary=1)排前面，确保 region 内 NAT 状态先建立
+        self.firewalls = db.query(Firewall).filter(
+            Firewall.is_active == 1
+        ).order_by(Firewall.is_zone_boundary.desc(), Firewall.id.asc()).all()
     
     def split_policy_to_single_ips(self, source_ips_str: str, dest_ips_str: str, 
                                      service: str, action: str) -> List[Dict]:

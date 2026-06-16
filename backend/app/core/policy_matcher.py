@@ -99,14 +99,24 @@ class PolicyMatcher:
         policy_id: Optional[int] = None,
         src_zone: str = "any",
         dst_zone: str = "any",
+        translated_src_ips: Optional[List[str]] = None,
+        translated_dst_ips: Optional[List[str]] = None,
     ) -> MatchResult:
-        """匹配一条工单策略"""
-        match_key = self._compute_match_key(src_ips, dst_ips, ports, valid_until)
-        reuse = self._resolve_object_reuse(src_ips, dst_ips, ports, valid_until)
+        """匹配一条工单策略
+
+        translated_*_ips: 同 region 内前序边界墙 SNAT 后的 IP（NAT 透传）
+                         非 None 时用于替换 hash 和精确比对的 IP
+        """
+        # 实际参与匹配的 IP：优先用 translated
+        effective_src = translated_src_ips if translated_src_ips is not None else src_ips
+        effective_dst = translated_dst_ips if translated_dst_ips is not None else dst_ips
+
+        match_key = self._compute_match_key(effective_src, effective_dst, ports, valid_until)
+        reuse = self._resolve_object_reuse(effective_src, effective_dst, ports, valid_until)
 
         # 1) deduplicate 模式：先查整条策略
         if self.mode == "deduplicate":
-            hit = self._find_exact_policy(src_ips, dst_ips, ports, valid_until, src_zone, dst_zone)
+            hit = self._find_exact_policy(effective_src, effective_dst, ports, valid_until, src_zone, dst_zone)
             if hit:
                 return MatchResult(
                     policy_id=policy_id,

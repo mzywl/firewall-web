@@ -15,13 +15,14 @@ interface NATInfo {
 }
 
 interface NATPolicy {
-  type: 'SNAT';               // 项目已取消 DNAT 分析
+  type: 'SNAT' | 'PASS_THROUGH';   // PASS_THROUGH = 同 region 其它墙透传边界墙 SNAT 结果
   source_zone: string;
   source_ip: string;
   dest_zone: string;
   dest_ip: string;
   service: string;
   action: string;
+  via_firewall?: { id: number; name: string };  // PASS_THROUGH 时标记来源边界墙
 }
 
 interface Policy {
@@ -301,31 +302,39 @@ export const Preview = () => {
                         </td>
                       </tr>
                       
-                      {/* NAT转换后的策略行 */}
-                      {policy.nat_policies.map((natPolicy, idx) => (
-                        <tr key={`${policy.id}-nat-${idx}`} className="border-t bg-blue-50">
-                          <td className="px-4 py-2"></td>
-                          <td className="px-4 py-2 text-blue-700">{natPolicy.source_zone}</td>
-                          <td className="px-4 py-2 text-blue-700 whitespace-pre-line">
-                            {natPolicy.source_ip}
-                            {natPolicy.type === 'SNAT' && (
-                              <span className="ml-2 px-2 py-0.5 bg-blue-200 text-blue-800 text-xs rounded">
-                                [SNAT]
+                      {/* NAT转换后的策略行（SNAT 转换 或 PASS_THROUGH 透传） */}
+                      {policy.nat_policies.map((natPolicy, idx) => {
+                        const isPassThrough = natPolicy.type === 'PASS_THROUGH'
+                        const rowBg = isPassThrough ? 'bg-emerald-50' : 'bg-blue-50'
+                        const textColor = isPassThrough ? 'text-emerald-700' : 'text-blue-700'
+                        const badgeBg = isPassThrough ? 'bg-emerald-200 text-emerald-800' : 'bg-blue-200 text-blue-800'
+                        const labelText = isPassThrough
+                          ? `[经 ${natPolicy.via_firewall?.name || '前序墙'} SNAT 转换]`
+                          : '[SNAT]'
+                        return (
+                          <tr key={`${policy.id}-nat-${idx}`} className={`border-t ${rowBg}`}>
+                            <td className="px-4 py-2"></td>
+                            <td className={`px-4 py-2 ${textColor}`}>{natPolicy.source_zone}</td>
+                            <td className={`px-4 py-2 ${textColor} whitespace-pre-line`}>
+                              {natPolicy.source_ip}
+                              <span className={`ml-2 px-2 py-0.5 ${badgeBg} text-xs rounded`}>
+                                {labelText}
                               </span>
-                            )}
-                          </td>
-                          <td className="px-4 py-2 text-blue-700">{natPolicy.dest_zone}</td>
-                          <td className="px-4 py-2 text-blue-700 whitespace-pre-line">
-                            {natPolicy.dest_ip}
-                            {/* DNAT badge 已删除: 项目不再分析 DNAT */}
-                          </td>
-                          <td className="px-4 py-2 text-blue-700 whitespace-pre-line">{natPolicy.service}</td>
-                          <td className="px-4 py-2 text-blue-700">{natPolicy.action}</td>
-                          <td className="px-4 py-2">
-                            <span className="text-xs text-blue-600">转换后</span>
-                          </td>
-                        </tr>
-                      ))}
+                            </td>
+                            <td className={`px-4 py-2 ${textColor}`}>{natPolicy.dest_zone}</td>
+                            <td className={`px-4 py-2 ${textColor} whitespace-pre-line`}>
+                              {natPolicy.dest_ip}
+                            </td>
+                            <td className={`px-4 py-2 ${textColor} whitespace-pre-line`}>{natPolicy.service}</td>
+                            <td className={`px-4 py-2 ${textColor}`}>{natPolicy.action}</td>
+                            <td className="px-4 py-2">
+                              <span className={`text-xs ${isPassThrough ? 'text-emerald-600' : 'text-blue-600'}`}>
+                                {isPassThrough ? '透传后' : '转换后'}
+                              </span>
+                            </td>
+                          </tr>
+                        )
+                      })}
                       
                       {/* NAT警告 */}
                       {policy.nat_info.warnings.length > 0 && (
