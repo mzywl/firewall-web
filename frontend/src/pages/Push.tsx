@@ -16,15 +16,13 @@ import { Button } from '../components/ui/Button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../components/ui/Card';
 import { PushProgressBar } from '../components/push/PushProgressBar';
 import { PushLogViewer } from '../components/push/PushLogViewer';
+import { useOrder, usePolicies } from '../hooks/useOrders';
 import {
-  useOrder,
   useStartPushV2,
-  useFirewalls,
-  useTestConnection,
   useSnapshot,
   useSnapshotLogs,
-  usePolicies,
-} from '../hooks/useApi';
+} from '../hooks/usePush';
+import { useFirewalls, useTestConnection } from '../hooks/useFirewalls';
 import type { PushMode, PushLogsResponse } from '../lib/api';
 import { toast } from '../lib/toast';
 

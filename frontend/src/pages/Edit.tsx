@@ -5,7 +5,7 @@ import { Button } from '../components/ui/Button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
 import { SyncScrollTable } from '../components/table/SyncScrollTable';
-import { useOrder, usePolicies, useUpdatePolicies } from '../hooks/useApi';
+import { useOrder, usePolicies, useUpdatePolicies } from '../hooks/useOrders';
 import type { Policy } from '../types';
 import { toast } from '../lib/toast';
 
@@ -14,14 +14,14 @@ export const Edit = () => {
   const navigate = useNavigate();
   const [autoExecute, setAutoExecute] = useState(false);
 
-  const { data: order, isLoading: orderLoading } = useOrder(Number(orderId));
-  
+  const { data: order, isLoading: orderLoading, error: orderError, refetch: refetchOrder } = useOrder(Number(orderId));
+
   // 获取第一次格式化数据（版本数据，只读）
   const { data: formattedV1Policies, isLoading: v1Loading } = usePolicies(
     Number(orderId),
     'formatted_v1'
   );
-  
+
   // 获取第二次格式化数据（Policy 表数据，可编辑，有真实ID）
   const { data: formattedV2Policies, isLoading: v2Loading, refetch } = usePolicies(
     Number(orderId),
@@ -83,6 +83,17 @@ export const Edit = () => {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
+      </div>
+    );
+  }
+
+  if (orderError) {
+    return (
+      <div className="text-center py-12">
+        <p className="text-red-600">加载工单失败</p>
+        <Button className="mt-4" onClick={() => refetchOrder()}>
+          重试
+        </Button>
       </div>
     );
   }

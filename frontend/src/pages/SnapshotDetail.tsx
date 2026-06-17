@@ -5,7 +5,7 @@ import { Button } from '../components/ui/Button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
 import { PushLogViewer } from '../components/push/PushLogViewer';
-import { useSnapshot, useSnapshotItems, useSnapshotLogs } from '../hooks/useApi';
+import { useSnapshot, useSnapshotItems, useSnapshotLogs } from '../hooks/usePush';
 
 export const SnapshotDetail = () => {
   const { snapshotId } = useParams<{ snapshotId: string }>();

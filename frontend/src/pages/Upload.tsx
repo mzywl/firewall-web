@@ -4,7 +4,7 @@ import { FileUploader } from '../components/upload/FileUploader';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '../components/ui/Card';
-import { useUploadExcel } from '../hooks/useApi';
+import { useUploadExcel } from '../hooks/useUpload';
 import { Loader2 } from 'lucide-react';
 import { toast } from '../lib/toast';
 
