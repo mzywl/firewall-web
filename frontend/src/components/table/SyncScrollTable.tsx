@@ -1,5 +1,6 @@
 import { useRef, useEffect, useCallback, useState } from 'react';
 import type { Policy } from '../../types';
+import { useSyncScroll } from '../../hooks/useSyncScroll';
 
 interface BaseProps {
   onUpdate?: (policies: Policy[]) => void;
@@ -42,26 +43,12 @@ export const SyncScrollTable = (props: SyncScrollTableProps) => {
 
   const topScrollRef = useRef<HTMLDivElement>(null);
   const bottomScrollRef = useRef<HTMLDivElement>(null);
-  const isScrollingRef = useRef(false);
-
-  // 同步滚动处理（使用 requestAnimationFrame 防抖）
-  const handleScroll = useCallback((source: 'top' | 'bottom') => {
-    if (isScrollingRef.current) return;
-
-    const sourceRef = source === 'top' ? topScrollRef : bottomScrollRef;
-    const targetRef = source === 'top' ? bottomScrollRef : topScrollRef;
-
-    if (!sourceRef.current || !targetRef.current) return;
-
-    isScrollingRef.current = true;
-
-    requestAnimationFrame(() => {
-      if (targetRef.current && sourceRef.current) {
-        targetRef.current.scrollLeft = sourceRef.current.scrollLeft;
-      }
-      isScrollingRef.current = false;
-    });
-  }, []);
+  // 同步滚动逻辑抽到 useSyncScroll hook, 组件内只负责 ref + handler 绑定
+  // (核心 17 行 + 防循环 latch + rAF 防抖, 详见 hooks/useSyncScroll.ts)
+  const { onScrollA: onTopScroll, onScrollB: onBottomScroll } = useSyncScroll(
+    topScrollRef,
+    bottomScrollRef,
+  );
 
   if (loading) {
     return (
@@ -84,7 +71,7 @@ export const SyncScrollTable = (props: SyncScrollTableProps) => {
         <div
           ref={bottomScrollRef}
           className="overflow-x-auto"
-          onScroll={() => handleScroll('bottom')}
+          onScroll={onBottomScroll}
         >
           <EditableTable policies={policies} onUpdate={onUpdate} editable={editable} />
         </div>
@@ -102,7 +89,7 @@ export const SyncScrollTable = (props: SyncScrollTableProps) => {
         <div
           ref={topScrollRef}
           className="overflow-x-auto"
-          onScroll={() => handleScroll('top')}
+          onScroll={onTopScroll}
         >
           <table className="w-full border-collapse table-fixed">
             <thead>
@@ -150,7 +137,7 @@ export const SyncScrollTable = (props: SyncScrollTableProps) => {
         <div
           ref={bottomScrollRef}
           className="overflow-x-auto"
-          onScroll={() => handleScroll('bottom')}
+          onScroll={onBottomScroll}
         >
           <EditableTable
             policies={props.bottomPolicies}
