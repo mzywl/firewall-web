@@ -20,12 +20,12 @@ export const UnmatchedPoliciesTable = ({ policies }: Props) => {
     <div className="border rounded-lg overflow-hidden mt-2">
       <table className="w-full text-sm table-fixed">
         <colgroup>
-          <col className="w-12" />      {/* 序号 */}
-          <col className="w-48" />     {/* 源IP */}
-          <col className="w-48" />     {/* 目的IP */}
-          <col className="w-32" />     {/* 服务/端口 */}
-          <col className="w-32" />     {/* 时间 */}
-          <col />                      {/* 原因 (占剩余宽度) */}
+          <col className="w-12" /> {/* 序号 */}
+          <col className="w-48" /> {/* 源IP */}
+          <col className="w-48" /> {/* 目的IP */}
+          <col className="w-32" /> {/* 服务/端口 */}
+          <col className="w-32" /> {/* 时间 */}
+          <col /> {/* 原因 (占剩余宽度) */}
         </colgroup>
         <thead className="bg-orange-100">
           <tr>

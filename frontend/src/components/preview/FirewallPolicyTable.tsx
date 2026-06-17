@@ -23,15 +23,15 @@ export const FirewallPolicyTable = ({ group }: Props) => {
     <div className="border rounded-lg overflow-hidden">
       <table className="w-full text-sm table-fixed">
         <colgroup>
-          <col className="w-12" />      {/* 序号 */}
-          <col className="w-24" />     {/* 源区域 (internal/external) */}
-          <col className="w-48" />     {/* 源IP */}
-          <col className="w-24" />     {/* 目的区域 */}
-          <col className="w-48" />     {/* 目的IP */}
-          <col className="w-32" />     {/* 服务/端口 */}
-          <col className="w-16" />     {/* 动作 */}
-          <col className="w-32" />     {/* 时间 */}
-          <col />                      {/* NAT (占剩余) */}
+          <col className="w-12" /> {/* 序号 */}
+          <col className="w-24" /> {/* 源区域 (internal/external) */}
+          <col className="w-48" /> {/* 源IP */}
+          <col className="w-24" /> {/* 目的区域 */}
+          <col className="w-48" /> {/* 目的IP */}
+          <col className="w-32" /> {/* 服务/端口 */}
+          <col className="w-16" /> {/* 动作 */}
+          <col className="w-32" /> {/* 时间 */}
+          <col /> {/* NAT (占剩余) */}
         </colgroup>
         <thead className="bg-muted">
           <tr>
