@@ -50,24 +50,46 @@ class NATAnalyzer:
             "dnat_address": None,           # 项目已取消 DNAT, 保留字段恒为 None
             "source_zone": None,
             "dest_zone": None,
+            "source_zone_name": None,       # 业务名: 对应 firewall.local_zone_name / external_zone_name
+            "dest_zone_name": None,
             "warnings": []
         }
 
+        # zone 判定(流量方向属性 internal/external): 任何防火墙都做, 跟是否做 NAT 无关
+        # 非边界墙不进入 NAT 判定, 但 zone 判定仍执行 → nat_info.source_zone/dest_zone 始终有值
         try:
-            # 步骤 1: 通过 firewall 的 protected_ips 段判断 src/dst 所属网络 zone
             source_zone = self._get_zone(source_ip, firewall)
             dest_zone = self._get_zone(dest_ip, firewall)
-
             result["source_zone"] = source_zone
             result["dest_zone"] = dest_zone
+            # 业务名映射: internal → firewall.local_zone_name, external → firewall.external_zone_name
+            result["source_zone_name"] = (
+                firewall.local_zone_name if source_zone == "internal"
+                else firewall.external_zone_name if source_zone == "external"
+                else None
+            )
+            result["dest_zone_name"] = (
+                firewall.local_zone_name if dest_zone == "internal"
+                else firewall.external_zone_name if dest_zone == "external"
+                else None
+            )
+        except Exception as e:
+            result["warnings"].append(f"zone 判定失败: {str(e)}")
 
-            # 无法判断区域（如 IP 不在任何 protected_ips 段）
-            if not source_zone or not dest_zone:
+        # 非边界墙: 跳过 NAT 判定, 直接返回 (zone 已填好, 前端可显示流量方向)
+        if not firewall.is_zone_boundary:
+            if not result["source_zone"] or not result["dest_zone"]:
+                result["warnings"].append("无法判断IP所属区域")
+            return result
+
+        try:
+            # 步骤 2: NAT 判定（仅边界墙, zone 判定已在前面的 try 完成）
+            if not result["source_zone"] or not result["dest_zone"]:
                 result["warnings"].append("无法判断IP所属区域")
                 return result
 
             # 同区域：不需要 NAT
-            if source_zone == dest_zone:
+            if result["source_zone"] == result["dest_zone"]:
                 return result
 
             # 跨区域：仅按 SNAT 处理
@@ -76,17 +98,17 @@ class NATAnalyzer:
 
             # 源在 internal 侧 → 出向（outbound_snat_pool）
             # 源在 external 侧 → 入向（inbound_snat_pool）
-            if source_zone == "internal" and dest_zone == "external":
+            if result["source_zone"] == "internal" and result["dest_zone"] == "external":
                 result["snat_address"] = firewall.outbound_snat_pool
                 if not result["snat_address"]:
                     result["warnings"].append("出向SNAT地址池未配置")
-            elif source_zone == "external" and dest_zone == "internal":
+            elif result["source_zone"] == "external" and result["dest_zone"] == "internal":
                 result["snat_address"] = firewall.inbound_snat_pool
                 if not result["snat_address"]:
                     result["warnings"].append("入向SNAT地址池未配置")
             else:
                 # 源或目的不在 internal/external 分类内（理论上 _get_zone 不会返回其他值）
-                result["warnings"].append(f"未知区域组合: source={source_zone}, dest={dest_zone}")
+                result["warnings"].append(f"未知区域组合: source={result['source_zone']}, dest={result['dest_zone']}")
                 result["snat_address"] = firewall.outbound_snat_pool
                 if not result["snat_address"]:
                     result["warnings"].append("出向SNAT地址池未配置")

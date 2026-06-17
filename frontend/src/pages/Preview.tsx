@@ -1,74 +1,19 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, AlertTriangle, Info } from 'lucide-react';
+import { ArrowLeft, AlertTriangle } from 'lucide-react';
 import { Button } from '../components/ui/Button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../components/ui/Card';
+import { UnmatchedPoliciesTable } from '../components/preview/UnmatchedPoliciesTable';
+import { FirewallPolicyTable } from '../components/preview/FirewallPolicyTable';
+import type {
+  FirewallGroup,
+  PreviewData,
+} from '../types';
 
-interface NATInfo {
-  need_nat: boolean;
-  nat_type: 'SNAT' | null;   // 项目已取消 DNAT 分析, 永远只会是 'SNAT' 或 null
-  snat_address: string | null;
-  dnat_address: null;        // 保留字段以兼容, 永远为 null
-  source_zone: string | null;
-  dest_zone: string | null;
-  warnings: string[];
-}
-
-interface NATPolicy {
-  type: 'SNAT' | 'PASS_THROUGH';   // PASS_THROUGH = 同 region 其它墙透传边界墙 SNAT 结果
-  source_zone: string;
-  source_ip: string;
-  dest_zone: string;
-  dest_ip: string;
-  service: string;
-  action: string;
-  via_firewall?: { id: number; name: string };  // PASS_THROUGH 时标记来源边界墙
-}
-
-interface Policy {
-  id: number;
-  sequence?: number;
-  original_policy_id?: number;
-  source_zone: string;
-  source_ip: string;
-  dest_zone: string;
-  dest_ip: string;
-  service: string;
-  action: string;
-  nat_info: NATInfo;
-  nat_policies: NATPolicy[];
-  not_pushed_reason?: string;
-}
-
-interface Firewall {
-  id: number;
-  name: string;
-  alias: string;
-  type: string;
-  management_ip: string;
-  region: string;
-  auto_push: number;
-  push_contact: string;
-}
-
-interface FirewallGroup {
-  firewall: Firewall;
-  policies: Policy[];
-}
-
-interface PreviewData {
-  order: {
-    id: number;
-    order_no: string;
-    title: string;
-    status: string;
-    created_at: string;
-  };
-  firewall_groups: FirewallGroup[];
-  unmatched_policies: Policy[];
-  warnings: string[];
-  errors: string[];
-}
+// 注: 旧的 NATInfo / NATPolicy / Policy / Firewall / FirewallGroup / PreviewData
+// 5 个本地 interface 已抽到 types/preview.ts (P1 类型统一)
+// 剩下 2 个 (FirewallGroup / PreviewData) 在本文件直接引用, 通过 import 拿
+// NATInfo / NATPolicy / Policy / Firewall 通过 PreviewPolicy.nested 间接使用, 不需要顶层 import
 
 export const Preview = () => {
   const { orderId } = useParams<{ orderId: string }>();
@@ -195,30 +140,7 @@ export const Preview = () => {
                 <div className="font-semibold text-orange-600 mb-1">
                   未匹配防火墙的策略（{previewData.unmatched_policies.length} 条）：
                 </div>
-                <div className="border rounded-lg overflow-hidden mt-2">
-                  <table className="w-full text-sm">
-                    <thead className="bg-orange-100">
-                      <tr>
-                        <th className="px-4 py-2 text-left w-16">序号</th>
-                        <th className="px-4 py-2 text-left">源IP</th>
-                        <th className="px-4 py-2 text-left">目的IP</th>
-                        <th className="px-4 py-2 text-left">服务/端口</th>
-                        <th className="px-4 py-2 text-left">原因</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {previewData.unmatched_policies.map((policy) => (
-                        <tr key={policy.id} className="border-t">
-                          <td className="px-4 py-2 font-semibold text-center">{policy.sequence}</td>
-                          <td className="px-4 py-2 whitespace-pre-line">{policy.source_ip}</td>
-                          <td className="px-4 py-2 whitespace-pre-line">{policy.dest_ip}</td>
-                          <td className="px-4 py-2 whitespace-pre-line">{policy.service}</td>
-                          <td className="px-4 py-2 text-orange-600">{policy.not_pushed_reason}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                <UnmatchedPoliciesTable policies={previewData.unmatched_policies} />
               </div>
             )}
           </CardContent>
@@ -260,100 +182,9 @@ export const Preview = () => {
             <div className="text-sm text-muted-foreground mb-3">
               共 {group.policies.length} 条策略
             </div>
-            
-            {/* 策略表格 */}
-            <div className="border rounded-lg overflow-hidden">
-              <table className="w-full text-sm">
-                <thead className="bg-muted">
-                  <tr>
-                    <th className="px-4 py-2 text-left w-16">序号</th>
-                    <th className="px-4 py-2 text-left">源区域</th>
-                    <th className="px-4 py-2 text-left">源IP</th>
-                    <th className="px-4 py-2 text-left">目的区域</th>
-                    <th className="px-4 py-2 text-left">目的IP</th>
-                    <th className="px-4 py-2 text-left">服务/端口</th>
-                    <th className="px-4 py-2 text-left">动作</th>
-                    <th className="px-4 py-2 text-left">NAT</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {group.policies.map((policy) => (
-                    <React.Fragment key={policy.id || policy.original_policy_id}>
-                      {/* 原始策略行 */}
-                      <tr key={policy.id} className="border-t hover:bg-muted/50">
-                        <td className="px-4 py-2 font-semibold text-center">{policy.sequence}</td>
-                        <td className="px-4 py-2">{policy.source_zone}</td>
-                        <td className="px-4 py-2 whitespace-pre-line">{policy.source_ip}</td>
-                        <td className="px-4 py-2">{policy.dest_zone}</td>
-                        <td className="px-4 py-2 whitespace-pre-line">{policy.dest_ip}</td>
-                        <td className="px-4 py-2 whitespace-pre-line">{policy.service}</td>
-                        <td className="px-4 py-2">{policy.action}</td>
-                        <td className="px-4 py-2">
-                          {policy.nat_info.need_nat ? (
-                            <div className="flex items-center gap-1">
-                              <Info className="h-4 w-4 text-blue-500" />
-                              <span className="text-blue-600 font-medium">
-                                {policy.nat_info.nat_type}
-                              </span>
-                            </div>
-                          ) : (
-                            <span className="text-gray-400">无需NAT</span>
-                          )}
-                        </td>
-                      </tr>
-                      
-                      {/* NAT转换后的策略行（SNAT 转换 或 PASS_THROUGH 透传） */}
-                      {policy.nat_policies.map((natPolicy, idx) => {
-                        const isPassThrough = natPolicy.type === 'PASS_THROUGH'
-                        const rowBg = isPassThrough ? 'bg-emerald-50' : 'bg-blue-50'
-                        const textColor = isPassThrough ? 'text-emerald-700' : 'text-blue-700'
-                        const badgeBg = isPassThrough ? 'bg-emerald-200 text-emerald-800' : 'bg-blue-200 text-blue-800'
-                        const labelText = isPassThrough
-                          ? `[经 ${natPolicy.via_firewall?.name || '前序墙'} SNAT 转换]`
-                          : '[SNAT]'
-                        return (
-                          <tr key={`${policy.id}-nat-${idx}`} className={`border-t ${rowBg}`}>
-                            <td className="px-4 py-2"></td>
-                            <td className={`px-4 py-2 ${textColor}`}>{natPolicy.source_zone}</td>
-                            <td className={`px-4 py-2 ${textColor} whitespace-pre-line`}>
-                              {natPolicy.source_ip}
-                              <span className={`ml-2 px-2 py-0.5 ${badgeBg} text-xs rounded`}>
-                                {labelText}
-                              </span>
-                            </td>
-                            <td className={`px-4 py-2 ${textColor}`}>{natPolicy.dest_zone}</td>
-                            <td className={`px-4 py-2 ${textColor} whitespace-pre-line`}>
-                              {natPolicy.dest_ip}
-                            </td>
-                            <td className={`px-4 py-2 ${textColor} whitespace-pre-line`}>{natPolicy.service}</td>
-                            <td className={`px-4 py-2 ${textColor}`}>{natPolicy.action}</td>
-                            <td className="px-4 py-2">
-                              <span className={`text-xs ${isPassThrough ? 'text-emerald-600' : 'text-blue-600'}`}>
-                                {isPassThrough ? '透传后' : '转换后'}
-                              </span>
-                            </td>
-                          </tr>
-                        )
-                      })}
-                      
-                      {/* NAT警告 */}
-                      {policy.nat_info.warnings.length > 0 && (
-                        <tr className="border-t bg-yellow-50">
-                          <td colSpan={8} className="px-4 py-2">
-                            <div className="flex items-start gap-2">
-                              <AlertTriangle className="h-4 w-4 text-yellow-600 mt-0.5" />
-                              <div className="text-sm text-yellow-700">
-                                {policy.nat_info.warnings.join('; ')}
-                              </div>
-                            </div>
-                          </td>
-                        </tr>
-                      )}
-                    </React.Fragment>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+
+            {/* 策略表格 (原始 + SNAT/PASS_THROUGH + warnings) */}
+            <FirewallPolicyTable group={group} />
           </CardContent>
         </Card>
       ))}

@@ -212,13 +212,27 @@ def get_order_policies(
     
     # 默认返回 Policy 表中的当前策略（可编辑，转换为中文字段名）
     policies = db.query(Policy).filter(Policy.order_id == order_id).all()
-    
-    # 获取 formatted_v2 版本数据，用于补充"使用时间"字段
+
+    # 优先从 user_modified 快照按 id 读"使用时间"（用户在 Edit 页编辑过的时间），
+    # fallback 到 formatted_v2 按行号/索引匹配（用户未编辑时的初始值）
+    user_modified_version = db.query(PolicyVersion).filter(
+        PolicyVersion.order_id == order_id,
+        PolicyVersion.version_type == 'user_modified'
+    ).first()
+    usage_time_by_id: dict[int, str] = {}
+    if user_modified_version:
+        for policy_dict in user_modified_version.data.get('policies', []):
+            pid = policy_dict.get('id')
+            ut = policy_dict.get('使用时间', '')
+            if pid is not None:
+                usage_time_by_id[pid] = ut
+
+    # formatted_v2 索引兜底
     formatted_v2_version = db.query(PolicyVersion).filter(
         PolicyVersion.order_id == order_id,
         PolicyVersion.version_type == 'formatted_v2'
     ).first()
-    
+
     # 构建使用时间映射（通过行号匹配）
     usage_time_map = {}
     if formatted_v2_version:
@@ -228,17 +242,20 @@ def get_order_policies(
             usage_time = policy_dict.get('使用时间', '')
             if row_number:
                 usage_time_map[row_number] = usage_time
-    
+
     # 将 Policy 对象转换为字典，并映射为中文字段名
     result = []
     for idx, policy in enumerate(policies):
-        # 尝试通过索引匹配使用时间（假设顺序一致）
-        usage_time = ''
-        if formatted_v2_version:
-            formatted_v2_data = formatted_v2_version.data.get('policies', [])
-            if idx < len(formatted_v2_data):
-                usage_time = formatted_v2_data[idx].get('使用时间', '')
-        
+        # 1) 优先用 user_modified 按 id 精确匹配
+        # 2) fallback 到 formatted_v2 按索引匹配（顺序一致时正确）
+        usage_time = usage_time_by_id.get(policy.id)
+        if usage_time is None:
+            usage_time = ''
+            if formatted_v2_version:
+                formatted_v2_data = formatted_v2_version.data.get('policies', [])
+                if idx < len(formatted_v2_data):
+                    usage_time = formatted_v2_data[idx].get('使用时间', '')
+
         policy_dict = {
             'id': policy.id,
             'order_id': policy.order_id,
@@ -252,7 +269,7 @@ def get_order_policies(
             '使用时间': usage_time,
         }
         result.append(policy_dict)
-    
+
     return result
 
 
@@ -280,6 +297,17 @@ def get_order_versions(order_id: int, db: Session = Depends(get_db)):
     ]
 
 
+# 前端 SyncScrollTable 使用的中文 key -> Policy 模型的英文字段
+FIELD_MAP = {
+    '源端系统-环境-用途': 'source_zone',
+    '源IP': 'source_ip',
+    '目的端系统-环境-用途': 'dest_zone',
+    '目的IP': 'dest_ip',
+    '目的端口': 'service',
+    # '使用时间' 不映射到 Policy 表，单独存进 user_modified 快照（Policy 表无此列）
+}
+
+
 @router.put("/{order_id}/policies")
 def update_policies(
     order_id: int,
@@ -289,32 +317,64 @@ def update_policies(
     """
     批量更新策略
     自动保存 user_modified 版本
+
+    接收前端发来的中文字段名 dict，内部映射到 Policy 模型的英文字段。
+    '使用时间' 字段（Policy 表无对应列）随 user_modified 快照一起保存，供
+    GET /policies（无 version）按 id 匹配回填。
     """
     order = db.query(Order).filter(Order.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="工单不存在")
-    
+
     try:
+        # DEBUG: 打印收到的 PUT body 概况,排查前端字段是否带上
+        if policies_data:
+            sample = policies_data[0]
+            print(f"[DEBUG update_policies] order_id={order_id} count={len(policies_data)} "
+                  f"sample_keys={list(sample.keys())} "
+                  f"使用时间_in_sample={'使用时间' in sample} "
+                  f"使用时间_value={sample.get('使用时间', '<missing>')!r}",
+                  flush=True)
+
+        actual_updated = 0
+        # 收集前端发来的"使用时间"，按 policy_id 索引
+        usage_time_map: dict[int, str] = {}
+
         for policy_data in policies_data:
             policy_id = policy_data.get('id')
             if not policy_id:
                 continue
-            
+
             policy = db.query(Policy).filter(
                 Policy.id == policy_id,
                 Policy.order_id == order_id
             ).first()
-            
-            if policy:
-                # 更新字段
-                for key, value in policy_data.items():
-                    if key != 'id' and hasattr(policy, key):
-                        setattr(policy, key, value)
-        
+
+            if not policy:
+                continue
+
+            # 中→英 字段名映射后 setattr
+            row_changed = False
+            for cn_key, value in policy_data.items():
+                if cn_key == 'id':
+                    continue
+                if cn_key == '使用时间':
+                    # Policy 表无此字段，存进 usage_time_map 后面写 user_modified
+                    if value is not None:
+                        usage_time_map[policy_id] = str(value)
+                    continue
+                en_key = FIELD_MAP.get(cn_key, cn_key)  # 英文 key 直通
+                if hasattr(policy, en_key):
+                    old_val = getattr(policy, en_key)
+                    if old_val != value:
+                        setattr(policy, en_key, value)
+                        row_changed = True
+            if row_changed:
+                actual_updated += 1
+
         db.commit()
-        
+
         # 保存用户修改版本
-        # 获取所有策略数据
         all_policies = db.query(Policy).filter(Policy.order_id == order_id).all()
         policies_dict = [
             {
@@ -325,18 +385,19 @@ def update_policies(
                 'dest_ip': p.dest_ip,
                 'service': p.service,
                 'action': p.action,
-                'firewall_id': p.firewall_id
+                'firewall_id': p.firewall_id,
+                # 把"使用时间"一起带进快照（user_modified 里有则用, 没有留空字符串）
+                '使用时间': usage_time_map.get(p.id, ''),
             }
             for p in all_policies
         ]
-        
-        # 删除旧的 user_modified 版本（如果存在）
+
+        # 删除旧的 user_modified 版本
         db.query(PolicyVersion).filter(
             PolicyVersion.order_id == order_id,
             PolicyVersion.version_type == 'user_modified'
         ).delete()
-        
-        # 创建新的 user_modified 版本
+
         user_version = PolicyVersion(
             order_id=order_id,
             version_type='user_modified',
@@ -344,9 +405,9 @@ def update_policies(
         )
         db.add(user_version)
         db.commit()
-        
-        return {"message": "策略更新成功", "updated_count": len(policies_data)}
-        
+
+        return {"message": "策略更新成功", "updated_count": actual_updated}
+
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"更新失败: {str(e)}")

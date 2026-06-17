@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Dict, Optional
 from app.database import get_db
-from app.models import Order, Policy, Firewall
+from app.models import Order, Policy, Firewall, PolicyVersion
 from app.core.firewall_matcher import FirewallMatcher, NOT_PUSHED_REASONS
 from app.core.nat_analyzer import NATAnalyzer
 from app.core.policy_splitter_v2 import PolicySplitterV2, PolicyMergerV2
@@ -50,6 +50,20 @@ def get_preview_data(order_id: int, db: Session = Depends(get_db)):
     #                   "via_firewall": {"id": int, "name": str}} }
     region_nat_state: Dict[str, Dict] = {}
 
+    # 加载 user_modified 快照, 按 policy_id 索引"使用时间"(用户在 Edit 页编辑过的最新值)
+    # Policy 表无"使用时间"列, 数据保存在 user_modified 快照里(见 orders.py update_policies)
+    usage_time_by_id: dict[int, str] = {}
+    user_modified_version = db.query(PolicyVersion).filter(
+        PolicyVersion.order_id == order_id,
+        PolicyVersion.version_type == 'user_modified'
+    ).first()
+    if user_modified_version:
+        for p_dict in user_modified_version.data.get('policies', []):
+            pid = p_dict.get('id')
+            ut = p_dict.get('使用时间', '')
+            if pid is not None:
+                usage_time_by_id[pid] = ut
+
     # 第一步：拆分所有策略为单IP策略
     for policy in policies:
         # 拆分成单IP策略
@@ -72,7 +86,8 @@ def get_preview_data(order_id: int, db: Session = Depends(get_db)):
                     "dest_ip": sp['dest_ip'],
                     "service": sp['service'],
                     "action": sp['action'],
-                    "not_pushed_reason": sp['not_pushed_reason']
+                    "not_pushed_reason": sp['not_pushed_reason'],
+                    "使用时间": usage_time_by_id.get(policy.id, ''),
                 })
                 continue
 
@@ -103,6 +118,8 @@ def get_preview_data(order_id: int, db: Session = Depends(get_db)):
                     "translated_dst_ip": translated_dst_ip,
                     "source_zone": nat_info.get("source_zone"),
                     "dest_zone": nat_info.get("dest_zone"),
+                    "source_zone_name": nat_info.get("source_zone_name"),
+                    "dest_zone_name": nat_info.get("dest_zone_name"),
                     "via_firewall": {"id": firewall.id, "name": firewall.name}
                 }
             else:
@@ -144,6 +161,7 @@ def get_preview_data(order_id: int, db: Session = Depends(get_db)):
                 'action': sp['action'],
                 'direction': sp['direction'],
                 'nat_info': nat_info,
+                '使用时间': usage_time_by_id.get(policy.id, ''),  # 来自 user_modified 快照
                 'pass_through': pass_through,  # 用于第二步合并后生成 PASS_THROUGH 行
                 'original_data': {
                     'source_zone': policy.source_zone,
@@ -237,9 +255,9 @@ def _generate_nat_policies(
         # SNAT：源IP转换（在本墙做 NAT）
         nat_policies.append({
             "type": "SNAT",
-            "source_zone": nat_info["source_zone"],
+            "source_zone": nat_info.get("source_zone_name") or nat_info["source_zone"],
             "source_ip": nat_info["snat_address"] or "[需要配置SNAT地址]",
-            "dest_zone": nat_info["dest_zone"],
+            "dest_zone": nat_info.get("dest_zone_name") or nat_info["dest_zone"],
             "dest_ip": original_policy["dest_ip"],
             "service": original_policy["service"],
             "action": original_policy["action"]
@@ -247,12 +265,14 @@ def _generate_nat_policies(
     # DNAT / BOTH 分支已删除：项目不再分析 DNAT
 
     # PASS_THROUGH：同 region 其它非边界墙的 SNAT 透传
+    # 透传行的 zone_name 必须用**当前 firewall** 的视角(fw7),不是 region_nat_state 里的边界墙(fw6)
+    # 因为 fw7 看 转换后 IP 仍是 external, 但 fw7 的 external_zone_name 跟 fw6 的不同
     if pass_through:
         nat_policies.append({
             "type": "PASS_THROUGH",
-            "source_zone": pass_through.get("source_zone", original_policy.get("source_zone")),
+            "source_zone": nat_info.get("source_zone_name") or pass_through.get("source_zone_name") or pass_through.get("source_zone", original_policy.get("source_zone")),
             "source_ip": pass_through["translated_src_ip"] or original_policy["source_ip"],
-            "dest_zone": pass_through.get("dest_zone", original_policy.get("dest_zone")),
+            "dest_zone": nat_info.get("dest_zone_name") or pass_through.get("dest_zone_name") or pass_through.get("dest_zone", original_policy.get("dest_zone")),
             "dest_ip": pass_through["translated_dst_ip"] or original_policy["dest_ip"],
             "service": original_policy["service"],
             "action": original_policy["action"],
