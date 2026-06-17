@@ -1,5 +1,6 @@
 import axios from 'axios';
 import type { Order, Policy, PolicyVersion, PushStatus } from '../types';
+import { toast } from './toast';
 
 // 同源：空 baseURL，nginx 同域名反代 /api
 // 如需直连后端调试，可设 VITE_API_BASE_URL=http://localhost:18000
@@ -11,6 +12,28 @@ const api = axios.create({
     'Content-Type': 'application/json',
   },
 });
+
+// ============================================================
+// 统一 401/403/500 错误处理
+// ============================================================
+// - 401: 未登录 / session 过期
+// - 403: 权限不足
+// - 5xx: 服务器错误
+// 业务 4xx (404/422/400 等) 仍由调用方自行 toast.apiError 处理，不全局弹
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const status = error.response?.status;
+    if (status === 401) {
+      toast.error('未登录或会话已过期', error);
+    } else if (status === 403) {
+      toast.error('权限不足', error);
+    } else if (status && status >= 500) {
+      toast.error('服务器错误', error);
+    }
+    return Promise.reject(error);
+  },
+);
 
 // ============================================================
 // v2 推送相关类型

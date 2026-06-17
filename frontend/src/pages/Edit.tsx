@@ -7,6 +7,7 @@ import { Badge } from '../components/ui/Badge';
 import { SyncScrollTable } from '../components/table/SyncScrollTable';
 import { useOrder, usePolicies, useUpdatePolicies } from '../hooks/useApi';
 import type { Policy } from '../types';
+import { toast } from '../lib/toast';
 
 export const Edit = () => {
   const { orderId } = useParams<{ orderId: string }>();
@@ -32,16 +33,15 @@ export const Edit = () => {
   const handleSave = async (updatedPolicies: Policy[]) => {
     try {
       await updateMutation.mutateAsync(updatedPolicies);
-      alert('保存成功！');
+      toast.success('保存成功');
       refetch();
-      
+
       // 如果勾选了自动执行，直接跳转到推送页面
       if (autoExecute) {
         navigate(`/order/${orderId}/push`);
       }
     } catch (error) {
-      console.error('保存失败:', error);
-      alert('保存失败，请重试');
+      toast.apiError(error, '保存失败，请重试');
     }
   };
 

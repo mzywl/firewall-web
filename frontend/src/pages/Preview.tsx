@@ -5,6 +5,7 @@ import { Button } from '../components/ui/Button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../components/ui/Card';
 import { UnmatchedPoliciesTable } from '../components/preview/UnmatchedPoliciesTable';
 import { FirewallPolicyTable } from '../components/preview/FirewallPolicyTable';
+import { toast } from '../lib/toast';
 import type {
   FirewallGroup,
   PreviewData,
@@ -45,8 +46,7 @@ export const Preview = () => {
       });
       setAutoExecute(initialAutoExecute);
     } catch (error) {
-      console.error('加载预览数据失败:', error);
-      alert('加载预览数据失败');
+      toast.apiError(error, '加载预览数据失败');
     } finally {
       setLoading(false);
     }

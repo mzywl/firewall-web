@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Info, Edit, Trash2 } from 'lucide-react';
 import { Button } from '../components/ui/Button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../components/ui/Card';
+import { toast } from '../lib/toast';
 
 interface Firewall {
   id: number;
@@ -63,8 +64,7 @@ export default function ZoneAccessConfig() {
       const data = await response.json();
       setFirewalls(data.firewalls);
     } catch (error) {
-      console.error('加载防火墙列表失败:', error);
-      alert('加载防火墙列表失败');
+      toast.apiError(error, '加载防火墙列表失败');
     }
   };
 
@@ -74,7 +74,7 @@ export default function ZoneAccessConfig() {
       const data = await response.json();
       setSavedConfigs(data.configs);
     } catch (error) {
-      console.error('加载配置列表失败:', error);
+      toast.apiError(error, '加载配置列表失败');
     }
   };
 
@@ -87,31 +87,30 @@ export default function ZoneAccessConfig() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const handleDelete = async (configId: number) => {
-    if (!confirm('确定要删除这条配置吗？')) {
-      return;
-    }
-
-    try {
-      const response = await fetch(`/api/zone-access/configs/${configId}`, {
-        method: 'DELETE'
-      });
-
-      if (response.ok) {
-        alert('配置已删除');
-        loadSavedConfigs();
-      } else {
-        alert('删除失败');
-      }
-    } catch (error) {
-      console.error('删除失败:', error);
-      alert('删除失败');
-    }
+  const handleDelete = (configId: number) => {
+    toast.confirm('确定要删除这条配置吗？', {
+      confirmText: '确认删除',
+      onConfirm: async () => {
+        try {
+          const response = await fetch(`/api/zone-access/configs/${configId}`, {
+            method: 'DELETE',
+          });
+          if (response.ok) {
+            toast.success('配置已删除');
+            loadSavedConfigs();
+          } else {
+            toast.error('删除失败');
+          }
+        } catch (error) {
+          toast.apiError(error, '删除失败');
+        }
+      },
+    });
   };
 
   const handleAnalyze = async () => {
     if (!sourceZone || !destZone) {
-      alert('请输入源区域和目的区域');
+      toast.warning('请输入源区域和目的区域');
       return;
     }
 
@@ -130,8 +129,7 @@ export default function ZoneAccessConfig() {
       }
       // 自动设置NAT类型逻辑已删除：项目不再分析 DNAT
     } catch (error) {
-      console.error('分析失败:', error);
-      alert('分析失败');
+      toast.apiError(error, '分析失败');
     } finally {
       setLoading(false);
     }
@@ -315,7 +313,7 @@ export default function ZoneAccessConfig() {
             <Button
               onClick={async () => {
                 if (!selectedFirewall) {
-                  alert('请选择防火墙');
+                  toast.warning('请选择防火墙');
                   return;
                 }
 
@@ -332,7 +330,7 @@ export default function ZoneAccessConfig() {
                   });
 
                   const data = await response.json();
-                  alert(data.message || '配置已保存');
+                  toast.success(data.message || '配置已保存');
 
                   // 重新加载配置列表
                   loadSavedConfigs();
@@ -344,8 +342,7 @@ export default function ZoneAccessConfig() {
                   setAnalysisResult(null);
                   setEditingConfigId(null);
                 } catch (error) {
-                  console.error('保存失败:', error);
-                  alert('保存失败');
+                  toast.apiError(error, '保存失败');
                 }
               }}
               disabled={!selectedFirewall}

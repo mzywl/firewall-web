@@ -5,6 +5,7 @@ import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { Badge } from '../components/ui/Badge';
 import axios from 'axios';
+import { toast } from '../lib/toast';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '/api';
 
@@ -48,23 +49,26 @@ export default function FirewallManagement() {
       // 防御：API 返非数组（HTML fallback、null、{}）时显示空列表，不崩
       setFirewalls(Array.isArray(response.data) ? response.data : []);
     } catch (error) {
-      console.error('获取防火墙列表失败:', error);
+      toast.apiError(error, '获取防火墙列表失败');
       setFirewalls([]);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleDelete = async (id: number) => {
-    if (!confirm('确定要删除这个防火墙配置吗？')) return;
-    
-    try {
-      await axios.delete(`${API_BASE_URL}/firewalls/${id}`);
-      fetchFirewalls();
-    } catch (error) {
-      console.error('删除失败:', error);
-      alert('删除失败');
-    }
+  const handleDelete = (id: number) => {
+    toast.confirm('确定要删除这个防火墙配置吗？', {
+      confirmText: '确认删除',
+      onConfirm: async () => {
+        try {
+          await axios.delete(`${API_BASE_URL}/firewalls/${id}`);
+          toast.success('已删除');
+          fetchFirewalls();
+        } catch (error) {
+          toast.apiError(error, '删除失败');
+        }
+      },
+    });
   };
 
   const filteredFirewalls = firewalls.filter(fw => {
