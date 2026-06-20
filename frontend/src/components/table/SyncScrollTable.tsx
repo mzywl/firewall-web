@@ -1,12 +1,29 @@
-import { useRef, useEffect, useCallback } from 'react';
+import { useRef, useEffect, useCallback, useState } from 'react';
 import type { Policy } from '../../types';
+import { useSyncScroll } from '../../hooks/useSyncScroll';
 
-interface SyncScrollTableProps {
-  topPolicies: Policy[];
-  bottomPolicies: Policy[];
+interface BaseProps {
   onUpdate?: (policies: Policy[]) => void;
   loading?: boolean;
 }
+
+interface DualProps extends BaseProps {
+  mode?: 'dual';
+  topPolicies: Policy[];
+  bottomPolicies: Policy[];
+  /** @deprecated 标题由外层 Card 渲染,组件内部不再写死 */
+  topTitle?: never;
+  bottomTitle?: never;
+}
+
+interface SingleProps extends BaseProps {
+  mode: 'single';
+  policies: Policy[];
+  editable?: boolean;
+  title?: string;
+}
+
+type SyncScrollTableProps = DualProps | SingleProps;
 
 // 固定列顺序和列宽配置（使用 Excel 原始中文字段名）
 const COLUMNS = [
@@ -18,39 +35,46 @@ const COLUMNS = [
   { key: '使用时间', label: '使用时间', width: '120px' },
 ];
 
-export const SyncScrollTable = ({
-  topPolicies,
-  bottomPolicies,
-  onUpdate,
-  loading = false
-}: SyncScrollTableProps) => {
+export const SyncScrollTable = (props: SyncScrollTableProps) => {
+  // dual 模式默认; single 模式用 policies / editable
+  const isSingle = props.mode === 'single';
+  const loading = props.loading ?? false;
+  const onUpdate = props.onUpdate;
+
   const topScrollRef = useRef<HTMLDivElement>(null);
   const bottomScrollRef = useRef<HTMLDivElement>(null);
-  const isScrollingRef = useRef(false);
-
-  // 同步滚动处理（使用 requestAnimationFrame 防抖）
-  const handleScroll = useCallback((source: 'top' | 'bottom') => {
-    if (isScrollingRef.current) return;
-
-    const sourceRef = source === 'top' ? topScrollRef : bottomScrollRef;
-    const targetRef = source === 'top' ? bottomScrollRef : topScrollRef;
-
-    if (!sourceRef.current || !targetRef.current) return;
-
-    isScrollingRef.current = true;
-
-    requestAnimationFrame(() => {
-      if (targetRef.current && sourceRef.current) {
-        targetRef.current.scrollLeft = sourceRef.current.scrollLeft;
-      }
-      isScrollingRef.current = false;
-    });
-  }, []);
+  // 同步滚动逻辑抽到 useSyncScroll hook, 组件内只负责 ref + handler 绑定
+  // (核心 17 行 + 防循环 latch + rAF 防抖, 详见 hooks/useSyncScroll.ts)
+  const { onScrollA: onTopScroll, onScrollB: onBottomScroll } = useSyncScroll(
+    topScrollRef,
+    bottomScrollRef,
+  );
 
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+      </div>
+    );
+  }
+
+  // single 模式: 单表格(支持 editable / onUpdate), 配 outer Card title
+  if (isSingle) {
+    const { policies, editable = false, title } = props as SingleProps;
+    return (
+      <div className="border rounded-lg overflow-hidden">
+        {title && (
+          <div className="bg-primary/10 px-4 py-2 border-b">
+            <h3 className="text-sm font-medium">{title}</h3>
+          </div>
+        )}
+        <div
+          ref={bottomScrollRef}
+          className="overflow-x-auto"
+          onScroll={onBottomScroll}
+        >
+          <EditableTable policies={policies} onUpdate={onUpdate} editable={editable} />
+        </div>
       </div>
     );
   }
@@ -65,14 +89,14 @@ export const SyncScrollTable = ({
         <div
           ref={topScrollRef}
           className="overflow-x-auto"
-          onScroll={() => handleScroll('top')}
+          onScroll={onTopScroll}
         >
           <table className="w-full border-collapse table-fixed">
             <thead>
               <tr className="border-b bg-muted/30">
                 {COLUMNS.map(col => (
-                  <th 
-                    key={col.key} 
+                  <th
+                    key={col.key}
                     className="px-3 py-2 text-left text-xs font-medium"
                     style={{ width: col.width, minWidth: col.width, maxWidth: col.width }}
                   >
@@ -82,13 +106,13 @@ export const SyncScrollTable = ({
               </tr>
             </thead>
             <tbody>
-              {topPolicies.map((policy, idx) => (
+              {props.topPolicies.map((policy, idx) => (
                 <tr key={idx} className="border-b hover:bg-muted/20">
                   {COLUMNS.map(col => {
                     const value = (policy as any)[col.key] || '';
                     return (
-                      <td 
-                        key={col.key} 
+                      <td
+                        key={col.key}
                         className="px-3 py-2 text-xs align-top"
                         style={{ width: col.width, minWidth: col.width }}
                       >
@@ -113,11 +137,12 @@ export const SyncScrollTable = ({
         <div
           ref={bottomScrollRef}
           className="overflow-x-auto"
-          onScroll={() => handleScroll('bottom')}
+          onScroll={onBottomScroll}
         >
           <EditableTable
-            policies={bottomPolicies}
+            policies={props.bottomPolicies}
             onUpdate={onUpdate}
+            editable={true}
           />
         </div>
       </div>
@@ -129,9 +154,10 @@ export const SyncScrollTable = ({
 interface EditableTableProps {
   policies: Policy[];
   onUpdate?: (policies: Policy[]) => void;
+  editable?: boolean;  // 默认 true; false 时单元格 onClick 短路, 完全只读
 }
 
-const EditableTable = ({ policies, onUpdate }: EditableTableProps) => {
+const EditableTable = ({ policies, onUpdate, editable = true }: EditableTableProps) => {
   const [editedPolicies, setEditedPolicies] = useState<Policy[]>(policies);
   const [editingCell, setEditingCell] = useState<{ rowId: number; field: string } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -219,9 +245,9 @@ const EditableTable = ({ policies, onUpdate }: EditableTableProps) => {
               return (
                 <td
                   key={col.key}
-                  className="px-3 py-2 cursor-text align-top"
+                  className={`px-3 py-2 align-top ${editable ? 'cursor-text cursor-pointer' : 'cursor-default'}`}
                   style={{ width: col.width, minWidth: col.width }}
-                  onClick={() => handleCellClick(policy.id!, col.key)}
+                  onClick={editable ? () => handleCellClick(policy.id!, col.key) : undefined}
                 >
                   {isEditing ? (
                     <textarea
@@ -247,6 +273,3 @@ const EditableTable = ({ policies, onUpdate }: EditableTableProps) => {
     </table>
   );
 };
-
-// 导入 useState
-import { useState } from 'react';

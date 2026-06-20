@@ -177,7 +177,7 @@ class H3CClient(FirewallClient):
         cmds: List[str] = []
         # 进入配置模式
         cmds.append("system-view")
-        # 先建缺的地址对象
+        # 先建缺的地址对象 + 服务对象
         for p in new_policies:
             cmds.extend(self._gen_address_objects(
                 p["src_ips"], f"{p['rule_name']}-src", existing_addresses,
@@ -188,22 +188,37 @@ class H3CClient(FirewallClient):
             cmds.extend(self._gen_service_objects(
                 p["ports"], f"{p['rule_name']}-svc", existing_services,
             ))
-            cmds.extend(self._gen_schedule_object(
-                p.get("valid_until", ""), f"{p['rule_name']}-sched",
-            ))
+        # time-range 跨规则 dedup — 同日期只建一次 (用日期作为 name, H3C 实际命令格式)
+        seen_schedules = set()
+        for p in new_policies:
+            vu = p.get("valid_until", "")
+            if vu and "长期" not in vu and vu not in seen_schedules:
+                seen_schedules.add(vu)
+                cmds.extend(self._gen_schedule_object(vu))
         # 然后建策略
         cmds.append("security-policy ip")
         for p in new_policies:
             # 每条策略可能多行命令（rule name + 各属性 + action）
             cmds.extend(self._gen_rule_command(p))
         cmds.append("quit")
-        cmds.append("quit")
+        # 退 system-view (H3C 用 return 跟 quit 等价, 跟用户示例一致)
+        cmds.append("return")
+        # 保存配置 (H3C 推送必须 save force, 否则重启后丢)
+        cmds.append("save force")
         return cmds
 
     def _gen_address_objects(
         self, ips: List[str], name_prefix: str, existing: List[AddressObject]
     ) -> List[str]:
-        """生成地址对象创建命令，复用已存在的"""
+        """生成地址对象创建命令，复用已存在的
+
+        对象名: 纯 IP 形式 (跟 H3C 真实命令一致)
+          - 单 IP: 10.2.179.130
+          - 范围: 192.169.1.135-142 (短格式, 同 /24 范围内只写末尾)
+          - 子网: 10.2.179.0/24
+        H3C object name 允许纯 IP (无前缀无引号), 不用 addr- 前缀
+        (Sangfor 必须保留 addr- 前缀 — 设备 object name 约束, 字母开头)
+        """
         existing_values = {a.value: a.name for a in existing if a.value}
         new_addrs = []
         for ip in ips:
@@ -213,21 +228,27 @@ class H3CClient(FirewallClient):
         if not new_addrs:
             return []
         cmds = []
-        for i, ip in enumerate(new_addrs):
-            obj_name = f"{name_prefix}-{i}"
+        for ip in new_addrs:
             if "/" in ip:
-                # subnet
                 net, mask = ip.split("/")
-                cmds.append(f'object-group ip address "{obj_name}"')
+                cmds.append(f"object-group ip address {ip}")
                 cmds.append(f"network subnet {net} {self._mask_from_prefix(int(mask))}")
                 cmds.append("quit")
             elif "-" in ip:
-                a, b = ip.split("-")
-                cmds.append(f'object-group ip address "{obj_name}"')
+                # 范围 IP: 短格式 (同 /24 范围只写末尾 octet)
+                a, b = ip.split("-", 1)
+                a_parts = a.split(".")
+                b_parts = b.split(".") if "." in b else None
+                if b_parts and a_parts[:3] == b_parts[:3]:
+                    # 同 /24 范围内: 192.169.1.135-142
+                    short_ip = f"{a}-{b_parts[3]}"
+                else:
+                    short_ip = ip
+                cmds.append(f"object-group ip address {short_ip}")
                 cmds.append(f"network range {a} {b}")
                 cmds.append("quit")
             else:
-                cmds.append(f'object-group ip address "{obj_name}"')
+                cmds.append(f"object-group ip address {ip}")
                 cmds.append(f"network host address {ip}")
                 cmds.append("quit")
         return cmds
@@ -246,10 +267,10 @@ class H3CClient(FirewallClient):
                 obj_name = f"UDP-{port}"
                 if "-" in port:
                     a, b = port.split("-")
-                    cmds.append(f'object-group service "{obj_name}"')
+                    cmds.append(f"object-group service {obj_name}")
                     cmds.append(f"service udp destination range {a} {b}")
                 else:
-                    cmds.append(f'object-group service "{obj_name}"')
+                    cmds.append(f"object-group service {obj_name}")
                     cmds.append(f"service udp destination eq {port}")
                 cmds.append("quit")
             else:
@@ -257,43 +278,72 @@ class H3CClient(FirewallClient):
                 obj_name = f"TCP-{port}"
                 if "-" in port:
                     a, b = port.split("-")
-                    cmds.append(f'object-group service "{obj_name}"')
+                    cmds.append(f"object-group service {obj_name}")
                     cmds.append(f"service tcp destination range {a} {b}")
                 else:
-                    cmds.append(f'object-group service "{obj_name}"')
+                    cmds.append(f"object-group service {obj_name}")
                     cmds.append(f"service tcp destination eq {port}")
                 cmds.append("quit")
         return cmds
 
-    def _gen_schedule_object(self, valid_until: str, name_prefix: str) -> List[str]:
+    def _gen_schedule_object(self, valid_until: str) -> List[str]:
+        """生成 H3C time-range 命令
+
+        命名: 用日期作为 name (例: `time-range 2026-12-31 ...`)
+              不再用 `{rule_name}-sched` — 跨规则共享同一日期时 dedup 共用
+        日期格式: MM/DD/YYYY (美式, 跟 H3C 真实命令一致)
+        """
         if not valid_until or "长期" in valid_until:
             return []
-        # valid_until 格式: "2025-12-31" 或 "2025/12/31"
-        date = valid_until.replace("/", "-")
+        # valid_until 格式: "2025-12-31" → 转 "12/31/2025"
+        try:
+            from datetime import datetime
+            date_obj = datetime.strptime(valid_until.replace("/", "-"), "%Y-%m-%d")
+            us_date = date_obj.strftime("%m/%d/%Y")
+            start_date = "01/01/2026"  # 跟用户示例一致: 从 2026-01-01 开始
+        except ValueError:
+            # 解析失败兜底
+            us_date = valid_until.replace("-", "/")
+            start_date = "01/01/2021"
         cmds = [
-            f'time-range "{name_prefix}" from 00:00:01 2021/01/01 to 23:59:59 {date}',
+            f"time-range {valid_until} from 00:00:01 {start_date} to 23:59:59 {us_date}",
         ]
         return cmds
 
     def _gen_rule_command(self, p: Dict[str, Any]) -> List[str]:
         """生成 H3C 单条 rule 的完整命令（多行）
 
-        H3C 的 object-group ip address 本身就是"组"形式，所以：
-          - 地址 object-group 命名: {rule_name}-src-{i} / -dst-{i}
-          - 策略 rule 直接引用这些 group 名
+        H3C 真实命令顺序:
+          rule name "..."
+          action pass
+          counting enable
+          logging enable
+          source-zone / destination-zone
+          source-ip / destination-ip (引用 addr-{ip})
+          service (引用 TCP-X / UDP-X)
+          time-range (引用时间对象名)
+
+        object name 跨 src/dst 复用 — 同 IP 只建一个, rule 引用纯 IP 形式
         """
         cmds = [f'rule name "{p["rule_name"]}"']
+        # 动作 (H3C 习惯 action 在前)
+        action = p.get("action", "permit")
+        cmds.append(f"action {action if action in ('permit', 'deny') else 'pass'}")
+        # 流量统计 + 日志 (H3C 推荐启用)
+        cmds.append("counting enable")
+        cmds.append("logging enable")
+        # 区域
         if p.get("src_zone") and p["src_zone"] != "any":
             cmds.append(f"source-zone {p['src_zone']}")
         if p.get("dst_zone") and p["dst_zone"] != "any":
             cmds.append(f"destination-zone {p['dst_zone']}")
-        # 源 IP：每个 IP 一个 object-group（已由 _gen_address_objects 创建）
-        for i, _ in enumerate(p.get("src_ips", [])):
-            cmds.append(f'source-ip "{p["rule_name"]}-src-{i}"')
+        # 源 IP
+        for ip in p.get("src_ips", []):
+            cmds.append(f'source-ip "{ip}"')
         # 目的 IP
-        for i, _ in enumerate(p.get("dst_ips", [])):
-            cmds.append(f'destination-ip "{p["rule_name"]}-dst-{i}"')
-        # 服务（每个端口一个 object-group service，已由 _gen_service_objects 创建）
+        for ip in p.get("dst_ips", []):
+            cmds.append(f'destination-ip "{ip}"')
+        # 服务
         for port in p.get("ports", []):
             if port.startswith("UDP:"):
                 port_v = port.split(":", 1)[1]
@@ -303,10 +353,7 @@ class H3CClient(FirewallClient):
         # 时间
         vu = p.get("valid_until", "")
         if vu and "长期" not in vu:
-            cmds.append(f'time-range "{p["rule_name"]}-sched"')
-        # 动作
-        action = p.get("action", "permit")
-        cmds.append(f"action {action if action in ('permit', 'deny') else 'pass'}")
+            cmds.append(f"time-range {vu}")
         return cmds
 
     def _port_key(self, p: str) -> tuple:

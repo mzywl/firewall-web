@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 import { Upload, FileSpreadsheet, X } from 'lucide-react';
 import { Button } from '../ui/Button';
 import { Card, CardContent } from '../ui/Card';
+import { toast } from '../../lib/toast';
 
 interface FileUploaderProps {
   onFileSelect: (file: File) => void;
@@ -33,7 +34,7 @@ export const FileUploader = ({ onFileSelect, isUploading = false }: FileUploader
         setSelectedFile(file);
         onFileSelect(file);
       } else {
-        alert('请上传 Excel 文件（.xlsx 或 .xls）');
+        toast.warning('请上传 Excel 文件（.xlsx 或 .xls）');
       }
     }
   }, [onFileSelect]);

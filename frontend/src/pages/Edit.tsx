@@ -5,23 +5,23 @@ import { Button } from '../components/ui/Button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
 import { SyncScrollTable } from '../components/table/SyncScrollTable';
-import { VirtualTable } from '../components/table/VirtualTable';
-import { useOrder, usePolicies, useUpdatePolicies } from '../hooks/useApi';
+import { useOrder, usePolicies, useUpdatePolicies } from '../hooks/useOrders';
 import type { Policy } from '../types';
+import { toast } from '../lib/toast';
 
 export const Edit = () => {
   const { orderId } = useParams<{ orderId: string }>();
   const navigate = useNavigate();
   const [autoExecute, setAutoExecute] = useState(false);
 
-  const { data: order, isLoading: orderLoading } = useOrder(Number(orderId));
-  
+  const { data: order, isLoading: orderLoading, error: orderError, refetch: refetchOrder } = useOrder(Number(orderId));
+
   // 获取第一次格式化数据（版本数据，只读）
   const { data: formattedV1Policies, isLoading: v1Loading } = usePolicies(
     Number(orderId),
     'formatted_v1'
   );
-  
+
   // 获取第二次格式化数据（Policy 表数据，可编辑，有真实ID）
   const { data: formattedV2Policies, isLoading: v2Loading, refetch } = usePolicies(
     Number(orderId),
@@ -33,16 +33,15 @@ export const Edit = () => {
   const handleSave = async (updatedPolicies: Policy[]) => {
     try {
       await updateMutation.mutateAsync(updatedPolicies);
-      alert('保存成功！');
+      toast.success('保存成功');
       refetch();
-      
+
       // 如果勾选了自动执行，直接跳转到推送页面
       if (autoExecute) {
         navigate(`/order/${orderId}/push`);
       }
     } catch (error) {
-      console.error('保存失败:', error);
-      alert('保存失败，请重试');
+      toast.apiError(error, '保存失败，请重试');
     }
   };
 
@@ -84,6 +83,17 @@ export const Edit = () => {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
+      </div>
+    );
+  }
+
+  if (orderError) {
+    return (
+      <div className="text-center py-12">
+        <p className="text-red-600">加载工单失败</p>
+        <Button className="mt-4" onClick={() => refetchOrder()}>
+          重试
+        </Button>
       </div>
     );
   }
@@ -217,13 +227,14 @@ export const Edit = () => {
               <CardTitle>第一次格式化（只读）</CardTitle>
               <CardDescription>标准化字段名 + 格式化IP/端口</CardDescription>
             </CardHeader>
-            <CardContent>
-              <VirtualTable
-                policies={formattedV1Policies || []}
-                editable={false}
-                loading={v1Loading}
-              />
-            </CardContent>
+          <CardContent>
+            <SyncScrollTable
+              mode="single"
+              policies={formattedV1Policies || []}
+              editable={false}
+              loading={v1Loading}
+            />
+          </CardContent>
           </Card>
 
           <Card>
@@ -231,14 +242,15 @@ export const Edit = () => {
               <CardTitle>第二次格式化（可编辑）</CardTitle>
               <CardDescription>删除示例策略 - 使用虚拟滚动优化性能</CardDescription>
             </CardHeader>
-            <CardContent>
-              <VirtualTable
-                policies={formattedV2Policies || []}
-                onUpdate={handleSave}
-                editable={true}
-                loading={v2Loading || updateMutation.isPending}
-              />
-            </CardContent>
+          <CardContent>
+            <SyncScrollTable
+              mode="single"
+              policies={formattedV2Policies || []}
+              editable={true}
+              onUpdate={handleSave}
+              loading={v2Loading || updateMutation.isPending}
+            />
+          </CardContent>
           </Card>
         </>
       )}

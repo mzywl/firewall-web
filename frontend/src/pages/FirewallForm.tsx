@@ -4,6 +4,7 @@ import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import axios from 'axios';
+import { toast } from '../lib/toast';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '/api';
 
@@ -105,8 +106,7 @@ export default function FirewallForm() {
         connection_config: data.connection_config || {}
       });
     } catch (error) {
-      console.error('获取防火墙信息失败:', error);
-      alert('获取防火墙信息失败');
+      toast.apiError(error, '获取防火墙信息失败');
     }
   };
 
@@ -128,15 +128,14 @@ export default function FirewallForm() {
       
       if (isEdit) {
         await axios.put(`${API_BASE_URL}/firewalls/${id}`, submitData);
-        alert('更新成功');
+        toast.success('更新成功');
       } else {
         await axios.post(`${API_BASE_URL}/firewalls`, submitData);
-        alert('创建成功');
+        toast.success('创建成功');
       }
       navigate('/firewalls');
     } catch (error) {
-      console.error('保存失败:', error);
-      alert('保存失败');
+      toast.apiError(error, '保存失败');
     } finally {
       setLoading(false);
     }

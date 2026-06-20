@@ -134,13 +134,15 @@ class FortigateClient(FirewallClient):
             for ip in p["src_ips"] + p["dst_ips"]:
                 if not ip or ip in existing_values:
                     continue
+                # 命名: `addr-{ip}` (跨 src/dst 复用 — 同 IP 只建一个对象)
+                obj_name = f"addr-{ip}"
                 if "/" in ip:
-                    cmds.append(f'edit "{p["rule_name"]}-{ip}"')
+                    cmds.append(f'edit "{obj_name}"')
                     cmds.append("set type ipmask")
                     cmds.append(f"set subnet {ip}")
                     cmds.append("next")
                 else:
-                    cmds.append(f'edit "{p["rule_name"]}-{ip}"')
+                    cmds.append(f'edit "{obj_name}"')
                     cmds.append("set type iprange")
                     cmds.append(f"set start-ip {ip}")
                     cmds.append(f"set end-ip {ip}")
@@ -151,8 +153,8 @@ class FortigateClient(FirewallClient):
         """为每条策略建 src / dst 两个 addrgrp（成员为该策略的 IP 列表）
 
         与 _build_fortigate_address_block 配合：
-          - address 名: {rule_name}-{ip}    (个体)
-          - addrgrp 名: {rule_name}-src / -dst  (组，policy 引用此名)
+          - address 名: addr-{ip}    (个体)
+          - addrgrp 名: {rule_name}-src-group / -dst-group  (组，policy 引用此名)
         """
         cmds = []
         for p in policies:
@@ -162,14 +164,14 @@ class FortigateClient(FirewallClient):
             if p["src_ips"]:
                 cmds.append(f'edit "{src_name}"')
                 cmds.append("set member " + " ".join(
-                    f'"{p["rule_name"]}-{ip}"' for ip in p["src_ips"]
+                    f'"addr-{ip}"' for ip in p["src_ips"]
                 ))
                 cmds.append("next")
             # 目的组
             if p["dst_ips"]:
                 cmds.append(f'edit "{dst_name}"')
                 cmds.append("set member " + " ".join(
-                    f'"{p["rule_name"]}-{ip}"' for ip in p["dst_ips"]
+                    f'"addr-{ip}"' for ip in p["dst_ips"]
                 ))
                 cmds.append("next")
         return cmds

@@ -63,10 +63,10 @@ class TestFortigateCommands:
         # 192.168.1.100 已在 existing → 不建
         # 192.168.2.0/24 新 → 建
         text = "\n".join(block)
-        assert 'edit "ORD001-P101-10.1.2.1"' in text
-        assert 'edit "ORD001-P101-192.168.2.0/24"' in text
-        assert 'edit "ORD001-P101-10.1.1.0/24"' not in text  # 跳过已存在
-        assert 'edit "ORD001-P101-192.168.1.100"' not in text  # 跳过已存在
+        assert 'edit "addr-10.1.2.1"' in text
+        assert 'edit "addr-192.168.2.0/24"' in text
+        assert 'edit "addr-10.1.1.0/24"' not in text  # 跳过已存在
+        assert 'edit "addr-192.168.1.100"' not in text  # 跳过已存在
 
     def test_addrgrp_references_real_addresses(self, sample_policy, existing_addresses):
         """addrgrp 的 member 必须引用前面 address block 建出的名"""
@@ -80,11 +80,11 @@ class TestFortigateCommands:
         assert 'edit "ORD001-P101-src-group"' in group_text
         assert 'edit "ORD001-P101-dst-group"' in group_text
         # src group 引用了所有 src IP（即使已存在——addrgrp 是逻辑概念，可引用任何名）
-        assert '"ORD001-P101-10.1.1.0/24"' in group_text
-        assert '"ORD001-P101-10.1.2.1"' in group_text
+        assert '"addr-10.1.1.0/24"' in group_text
+        assert '"addr-10.1.2.1"' in group_text
         # dst group
-        assert '"ORD001-P101-192.168.1.100"' in group_text
-        assert '"ORD001-P101-192.168.2.0/24"' in group_text
+        assert '"addr-192.168.1.100"' in group_text
+        assert '"addr-192.168.2.0/24"' in group_text
 
     def test_service_block_deduplicates(self, sample_policy, existing_services):
         """service 块去重（多策略共享同一 port 不重复创建）"""
@@ -237,7 +237,7 @@ class TestSangforCommands:
 
 class TestH3CCommands:
     def test_address_objects_naming(self, sample_policy):
-        """H3C 的 object-group ip address 命名: {rule_name}-src-{i} / -dst-{i}"""
+        """H3C 的 object-group ip address 命名: `addr-{ip}` (跨 src/dst 复用 — 同 IP 只建一个)"""
         client = H3CClient.__new__(H3CClient)
         src_block = client._gen_address_objects(
             sample_policy["src_ips"],
@@ -251,17 +251,14 @@ class TestH3CCommands:
         )
         src_text = "\n".join(src_block)
         dst_text = "\n".join(dst_block)
-        # src-0 = 10.1.1.0/24 (subnet)
-        assert 'object-group ip address "ORD001-P101-src-0"' in src_text
+        # 命名: addr-{ip} (跟 IP 形式)
+        assert 'object-group ip address "addr-10.1.1.0/24"' in src_text
         assert "network subnet 10.1.1.0 255.255.255.0" in src_text
-        # src-1 = 10.1.2.1 (host)
-        assert 'object-group ip address "ORD001-P101-src-1"' in src_text
+        assert 'object-group ip address "addr-10.1.2.1"' in src_text
         assert "network host address 10.1.2.1" in src_text
-        # dst-0 = 192.168.1.100 (host)
-        assert 'object-group ip address "ORD001-P101-dst-0"' in dst_text
+        assert 'object-group ip address "addr-192.168.1.100"' in dst_text
         assert "network host address 192.168.1.100" in dst_text
-        # dst-1 = 192.168.2.0/24 (subnet)
-        assert 'object-group ip address "ORD001-P101-dst-1"' in dst_text
+        assert 'object-group ip address "addr-192.168.2.0/24"' in dst_text
 
     def test_rule_command_full_multiline(self, sample_policy):
         """_gen_rule_command 必须生成完整多行（rule name + 各属性 + action）"""
@@ -273,11 +270,11 @@ class TestH3CCommands:
         # source-zone / destination-zone
         assert "source-zone trust" in cmds
         assert "destination-zone untrust" in cmds
-        # source-ip / destination-ip（每个 IP 一行）
-        assert 'source-ip "ORD001-P101-src-0"' in cmds
-        assert 'source-ip "ORD001-P101-src-1"' in cmds
-        assert 'destination-ip "ORD001-P101-dst-0"' in cmds
-        assert 'destination-ip "ORD001-P101-dst-1"' in cmds
+        # source-ip / destination-ip（每个 IP 一行, 引用 addr-{ip}）
+        assert 'source-ip "addr-10.1.1.0/24"' in cmds
+        assert 'source-ip "addr-10.1.2.1"' in cmds
+        assert 'destination-ip "addr-192.168.1.100"' in cmds
+        assert 'destination-ip "addr-192.168.2.0/24"' in cmds
         # service（每个端口一行）
         assert 'service "TCP-80"' in cmds
         assert 'service "TCP-443"' in cmds
@@ -288,7 +285,7 @@ class TestH3CCommands:
         assert "action permit" in cmds
 
     def test_full_generation_references_exist(self, sample_policy):
-        """完整生成：rule 引用的所有 src-X/dst-X/svc-X 都必须前面建了"""
+        """完整生成：rule 引用的所有 addr-{ip}/svc-X 都必须前面建了"""
         client = H3CClient.__new__(H3CClient)
         cmds = client.generate_commands(
             new_policies=[sample_policy],
@@ -304,9 +301,9 @@ class TestH3CCommands:
         pos_rule = text.index('rule name "ORD001-P101"')
         assert pos_addr < pos_svc < pos_sec < pos_rule
 
-        # rule 中引用的 group 名都在 addr/svc 段
-        assert 'object-group ip address "ORD001-P101-src-0"' in text
-        assert 'object-group ip address "ORD001-P101-dst-0"' in text
+        # rule 中引用的对象名都在 addr/svc 段 (addr-{ip} 形式)
+        assert 'object-group ip address "addr-10.1.1.0/24"' in text
+        assert 'object-group ip address "addr-192.168.1.100"' in text
         assert 'object-group service "TCP-80"' in text
         assert 'object-group service "UDP-53"' in text
 

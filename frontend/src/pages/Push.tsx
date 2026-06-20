@@ -16,16 +16,15 @@ import { Button } from '../components/ui/Button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../components/ui/Card';
 import { PushProgressBar } from '../components/push/PushProgressBar';
 import { PushLogViewer } from '../components/push/PushLogViewer';
+import { useOrder, usePolicies } from '../hooks/useOrders';
 import {
-  useOrder,
   useStartPushV2,
-  useFirewalls,
-  useTestConnection,
   useSnapshot,
   useSnapshotLogs,
-  usePolicies,
-} from '../hooks/useApi';
+} from '../hooks/usePush';
+import { useFirewalls, useTestConnection } from '../hooks/useFirewalls';
 import type { PushMode, PushLogsResponse } from '../lib/api';
+import { toast } from '../lib/toast';
 
 export const Push = () => {
   const { orderId } = useParams<{ orderId: string }>();
@@ -68,11 +67,11 @@ export const Push = () => {
 
   const handleStart = async () => {
     if (!firewallId) {
-      alert('请先选择目标防火墙');
+      toast.warning('请先选择目标防火墙');
       return;
     }
     if (!policies || policies.length === 0) {
-      alert('工单没有可推送的策略');
+      toast.warning('工单没有可推送的策略');
       return;
     }
     setIsCompleted(false);
@@ -84,11 +83,10 @@ export const Push = () => {
       if (result.snapshot_id) {
         setSnapshotId(result.snapshot_id);
       }
-    } catch (error: any) {
+    } catch (error) {
       setIsPushing(false);
       setIsCompleted(false);
-      const msg = error?.response?.data?.detail || error?.message || '推送失败';
-      alert(`启动推送失败: ${msg}`);
+      toast.apiError(error, '启动推送失败');
     }
   };
 
@@ -101,7 +99,7 @@ export const Push = () => {
 
   const handleTestConnection = async () => {
     if (!firewallId) {
-      alert('请先选择目标防火墙');
+      toast.warning('请先选择目标防火墙');
       return;
     }
     setTestResult(null);

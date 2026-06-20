@@ -1,176 +1,206 @@
 """
-策略合并优化算法
+策略合并优化算法（全量压缩版）
 """
 from typing import List, Dict, Any
 from collections import defaultdict
-import ipaddress
 
 
 class PolicyMerger:
     """策略合并优化器"""
-    
+
     def __init__(self):
         self.merged_policies = []
-    
+
     def merge_policies(self, policies: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         合并策略
         规则：
-        1. 相同源IP、目的IP、协议的策略合并端口
-        2. 连续端口范围优化
-        3. 标记冗余策略
+        1. 相同源IP、目的IP、协议、使用时间的策略合并端口
+        2. 连续端口范围智能压缩 (如 80,81,82 -> 80-82)
+        3. 跨策略无序多端口全量拼接 (如 80 和 443 -> 80,443)
         """
-        # 按 (源IP, 目的IP, 协议) 分组
+        if not policies:
+            return []
+
+        # 按 (源IP, 目的IP, 协议, 有效期) 联合四维度分组
         groups = defaultdict(list)
-        
+
         for policy in policies:
-            key = (
-                policy.get('source_ip', ''),
-                policy.get('dest_ip', ''),
-                self._extract_protocol(policy.get('service', ''))
-            )
+            # 统一对输入的 IP 做一次轻量级清洗标准化，防止因"/32"后缀有无导致分组失败
+            src_ip = self._norm_ip_for_key(policy.get('source_ip', ''))
+            dst_ip = self._norm_ip_for_key(policy.get('dest_ip', ''))
+            proto = self._extract_protocol(policy.get('service', ''))
+            usage_time = str(policy.get('usage_time', '长期')).strip()
+
+            key = (src_ip, dst_ip, proto, usage_time)
             groups[key].append(policy)
-        
+
         merged = []
-        
+
         for key, group in groups.items():
             if len(group) == 1:
-                # 单个策略，不需要合并
                 merged.append(group[0])
             else:
-                # 多个策略，尝试合并
-                merged_policy = self._merge_group(group)
-                merged.extend(merged_policy)
-        
+                # 触发多策略深度融合压缩
+                merged.extend(self._merge_group(group))
+
         return merged
-    
+
     def _merge_group(self, policies: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """合并同组策略"""
-        # 提取所有端口
+        """合并同组多条策略的端口"""
+        proto = self._extract_protocol(policies[0].get('service', ''))
+
+        # 1. 全量提取该组下的所有端口数字
         ports = []
         for policy in policies:
             service = policy.get('service', '')
             ports.extend(self._extract_ports(service))
-        
-        # 去重并排序
+
+        if not ports:
+            # 如果没提取出数字端口（如 "any"），保留原样
+            return policies
+
+        # 2. 去重并排序
         ports = sorted(set(ports))
-        
-        # 优化端口范围
+
+        # 3. 连续端口段压缩优化（返回如 ['80', '443', '8080-8085']）
         port_ranges = self._optimize_port_ranges(ports)
-        
-        # 如果可以合并成一个策略
-        if len(port_ranges) == 1:
-            merged_policy = policies[0].copy()
-            merged_policy['service'] = port_ranges[0]
-            merged_policy['is_merged'] = 1
-            merged_policy['merged_from'] = [p.get('id') for p in policies]
-            return [merged_policy]
-        
-        # 否则返回原策略
-        return policies
-    
+
+        # 4. 彻底修复原版 len==1 的限制：将所有优化后的端口段用逗号重新聚合成标准字符串
+        #    并根据协议类型重新附带标准前缀（如果是 UDP，则重新附带 "UDP:" 标记）
+        if proto == 'udp':
+            combined_service = ",".join([f"UDP:{pr}" for pr in port_ranges])
+        else:
+            combined_service = ",".join(port_ranges)
+
+        # 5. 组装合并后的全新策略主体
+        merged_policy = policies[0].copy()
+        merged_policy['service'] = combined_service
+        merged_policy['is_merged'] = 1
+
+        # 收集溯源 ID（用于向主表关联更新 merged_policy_id）
+        merged_policy['merged_from'] = [p.get('id') for p in policies if p.get('id') is not None]
+
+        return [merged_policy]
+
     def _extract_protocol(self, service: str) -> str:
-        """提取协议（tcp/udp/icmp）"""
+        """提取协议特征"""
         if not service:
-            return 'any'
-        
+            return 'tcp'  # 默认降级为 tcp
+
         service_lower = service.lower()
-        if 'tcp' in service_lower:
-            return 'tcp'
-        elif 'udp' in service_lower:
+        if 'udp' in service_lower:
             return 'udp'
         elif 'icmp' in service_lower:
             return 'icmp'
         else:
-            return 'any'
-    
+            return 'tcp'  # 默认归类为 tcp
+
     def _extract_ports(self, service: str) -> List[int]:
-        """从服务字段提取端口列表"""
+        """从服务字段精准剥离纯数字端口"""
         if not service:
             return []
-        
+
         ports = []
-        
-        # 移除协议前缀（tcp/udp）
-        service = service.replace('tcp/', '').replace('udp/', '').replace('TCP/', '').replace('UDP/', '')
-        
-        # 处理多个端口（逗号分隔）
-        parts = service.split(',')
-        
+        # 清洗由于各类格式化器引入的所有已知前缀/后缀干扰
+        s_clean = service.upper()
+        for prefix in ['TCP/', 'UDP/', 'TCP:', 'UDP:']:
+            s_clean = s_clean.replace(prefix, '')
+
+        parts = s_clean.split(',')
         for part in parts:
             part = part.strip()
-            
-            # 处理端口范围（例如：8080-8090）
+            if not part:
+                continue
+
             if '-' in part:
                 try:
                     start, end = part.split('-')
                     start_port = int(start.strip())
                     end_port = int(end.strip())
-                    ports.extend(range(start_port, end_port + 1))
-                except:
+                    if start_port <= end_port:
+                        ports.extend(range(start_port, end_port + 1))
+                except ValueError:
                     pass
             else:
-                # 单个端口
                 try:
                     ports.append(int(part))
-                except:
+                except ValueError:
                     pass
-        
         return ports
-    
+
     def _optimize_port_ranges(self, ports: List[int]) -> List[str]:
-        """优化端口范围"""
+        """优化连续端口范围"""
         if not ports:
             return []
-        
+
         ranges = []
         start = ports[0]
         end = ports[0]
-        
+
         for i in range(1, len(ports)):
             if ports[i] == end + 1:
-                # 连续端口
                 end = ports[i]
             else:
-                # 不连续，保存当前范围
                 if start == end:
                     ranges.append(str(start))
                 else:
                     ranges.append(f"{start}-{end}")
                 start = ports[i]
                 end = ports[i]
-        
-        # 保存最后一个范围
+
         if start == end:
             ranges.append(str(start))
         else:
             ranges.append(f"{start}-{end}")
-        
+
         return ranges
-    
+
+    # ============================================================
+    #                      语义级冗余检测层
+    # ============================================================
+
     def detect_redundant(self, policies: List[Dict[str, Any]]) -> List[int]:
         """
-        检测冗余策略
-        返回冗余策略的 ID 列表
+        语义级冗余策略判定
+        返回被完全包容、应当被标记或剔除的冗余策略 ID 列表
         """
         redundant_ids = []
-        
-        for i, policy1 in enumerate(policies):
-            for j, policy2 in enumerate(policies):
-                if i >= j:
+
+        # 为了提高比对效率，前置将所有策略的语义 Key 提取并标准化
+        parsed_meta = []
+        for p in policies:
+            parsed_meta.append({
+                'id': p.get('id'),
+                'src': self._norm_ip_for_key(p.get('source_ip', '')),
+                'dst': self._norm_ip_for_key(p.get('dest_ip', '')),
+                'ports_set': set(self._extract_ports(p.get('service', ''))),
+                'proto': self._extract_protocol(p.get('service', '')),
+                'time': str(p.get('usage_time', '长期')).strip()
+            })
+
+        for i, p1 in enumerate(parsed_meta):
+            for j, p2 in enumerate(parsed_meta):
+                if i == j:
                     continue
-                
-                # 检查是否完全包含
-                if self._is_redundant(policy1, policy2):
-                    redundant_ids.append(policy2.get('id'))
-        
+                # 如果 p2 的四维度完全被 p1 覆盖，则 p2 属于冗余策略
+                if (p1['src'] == p2['src'] and
+                    p1['dst'] == p2['dst'] and
+                    p1['proto'] == p2['proto'] and
+                    p1['time'] == p2['time'] and
+                    p2['ports_set'].issubset(p1['ports_set'])):  # 👈 端口子集全包容判定
+
+                    if p2['id'] is not None:
+                        redundant_ids.append(p2['id'])
+
         return list(set(redundant_ids))
-    
-    def _is_redundant(self, policy1: Dict[str, Any], policy2: Dict[str, Any]) -> bool:
-        """检查 policy2 是否被 policy1 完全包含"""
-        # 简化版：只检查源IP、目的IP、服务是否相同
-        return (
-            policy1.get('source_ip') == policy2.get('source_ip') and
-            policy1.get('dest_ip') == policy2.get('dest_ip') and
-            policy1.get('service') == policy2.get('service')
-        )
+
+    @staticmethod
+    def _norm_ip_for_key(ip_str: str) -> str:
+        """归一化 IP 辅助工具：去除首尾空格、去除单 IP 末尾冗余的 /32"""
+        if not ip_str:
+            return ""
+        s = str(ip_str).strip().replace(' ', '')
+        if s.endswith('/32'):
+            return s[:-3]
+        return s

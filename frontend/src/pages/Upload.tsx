@@ -4,8 +4,9 @@ import { FileUploader } from '../components/upload/FileUploader';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '../components/ui/Card';
-import { useUploadExcel } from '../hooks/useApi';
+import { useUploadExcel } from '../hooks/useUpload';
 import { Loader2 } from 'lucide-react';
+import { toast } from '../lib/toast';
 
 export const Upload = () => {
   const navigate = useNavigate();
@@ -26,8 +27,7 @@ export const Upload = () => {
       // 上传成功，跳转到编辑页面
       navigate(`/order/${result.id}/edit`);
     } catch (error) {
-      console.error('上传失败:', error);
-      alert('上传失败，请重试');
+      toast.apiError(error, '上传失败，请重试');
     }
   };
 

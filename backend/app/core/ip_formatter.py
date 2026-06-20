@@ -340,7 +340,7 @@ class PortFormatter:
             valid = PortFormatter._validate_ports(tokens)
             merged = PortFormatter._merge_continuous_ports(valid)
 
-            return ",".join(merged)
+            return "\n".join(merged)
 
         except Exception as e:
             logger.warning(f"端口格式化失败: {port_str}, 错误: {str(e)}")
