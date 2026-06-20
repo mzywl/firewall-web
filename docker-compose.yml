@@ -17,8 +17,8 @@ services:
       POSTGRES_DB: firewall_db
     # 生产环境不直接暴露 5432 到 host（容器间访问）
     # 如需从 host 调试：取消下面这行
-    # ports:
-    #   - "5432:5432"
+    ports:
+      - "54321:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:

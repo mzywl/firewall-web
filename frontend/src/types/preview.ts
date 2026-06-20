@@ -98,3 +98,58 @@ export interface PreviewData {
   warnings: string[];
   errors: string[];
 }
+
+// ============================================================
+// 推送脚本（dry-run）响应类型
+// ============================================================
+//
+// POST /api/push/orders/{order_id}/generate-script?firewall_id=X
+// 返回 — 见 backend/app/api/push.py generate_push_script
+//
+// 用途: 不连设备 / 不复用现有对象 / 纯本地生成 CLI 命令脚本
+//       前端用 Modal 弹窗显示, 复制给运维手工执行
+
+export interface GenerateScriptSkipped {
+  policy_id: number;
+  source_ip: string;
+  dest_ip: string;
+  reason: string;
+}
+
+export interface GenerateScriptNewPolicy {
+  policy_id: number;
+  rule_name: string;
+  src_ips: string[];
+  dst_ips: string[];
+  ports: string[];
+  valid_until: string;
+  src_zone: string;
+  dst_zone: string;
+  action: string;
+}
+
+export interface GenerateScriptStats {
+  total_order_policies: number;
+  to_push: number;
+  skipped: number;
+  commands: number;
+}
+
+export interface GenerateScriptResponse {
+  success: boolean;
+  firewall: {
+    id: number;
+    name: string;
+    type: string;
+    management_ip: string;
+  };
+  order: {
+    id: number;
+    order_no: string;
+    title: string;
+  };
+  stats: GenerateScriptStats;
+  new_policies: GenerateScriptNewPolicy[];
+  commands: string[];
+  skipped: GenerateScriptSkipped[];
+}

@@ -1,14 +1,16 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, AlertTriangle, FileCode } from 'lucide-react';
 import { Button } from '../components/ui/Button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../components/ui/Card';
 import { UnmatchedPoliciesTable } from '../components/preview/UnmatchedPoliciesTable';
 import { FirewallPolicyTable } from '../components/preview/FirewallPolicyTable';
+import { PushScriptModal } from '../components/preview/PushScriptModal';
 import { toast } from '../lib/toast';
 import type {
   FirewallGroup,
   PreviewData,
+  PreviewFirewall,
 } from '../types';
 
 // 注: 旧的 NATInfo / NATPolicy / Policy / Firewall / FirewallGroup / PreviewData
@@ -22,6 +24,7 @@ export const Preview = () => {
   const [previewData, setPreviewData] = useState<PreviewData | null>(null);
   const [loading, setLoading] = useState(true);
   const [autoExecute, setAutoExecute] = useState<Record<number, boolean>>({});
+  const [scriptModalFirewall, setScriptModalFirewall] = useState<PreviewFirewall | null>(null);
 
   useEffect(() => {
     loadPreviewData();
@@ -166,6 +169,15 @@ export const Preview = () => {
                 </CardDescription>
               </div>
               <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setScriptModalFirewall(group.firewall)}
+                  title="查看要推送到此防火墙的 CLI 命令脚本（不连设备）"
+                >
+                  <FileCode className="h-4 w-4 mr-1" />
+                  查看脚本
+                </Button>
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
                     type="checkbox"
@@ -201,6 +213,15 @@ export const Preview = () => {
           下一步：推送策略
         </Button>
       </div>
+
+      {/* 推送脚本弹窗（dry-run） */}
+      {scriptModalFirewall && (
+        <PushScriptModal
+          orderId={Number(orderId)}
+          firewall={scriptModalFirewall}
+          onClose={() => setScriptModalFirewall(null)}
+        />
+      )}
     </div>
   );
 };

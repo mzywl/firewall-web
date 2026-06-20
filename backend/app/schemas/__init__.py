@@ -99,7 +99,9 @@ class FirewallBase(BaseModel):
     management_ip: str = Field(..., max_length=50)
     
     # 区域信息
-    region: Optional[str] = Field(None, max_length=100)
+    region: Optional[str] = Field(None, max_length=100, description="所属区域(组织归属)")
+    # covered_region 表达 "防护区域" (技术属性, 跟 region "所在区域" 区分), 默认=region
+    covered_region: Optional[str] = Field(None, max_length=100, description="防护区域(NAT 透传 key, 跟 region 区分)")
     local_zone_name: Optional[str] = Field(None, max_length=100)
     external_zone_name: Optional[str] = Field(None, max_length=100)
     

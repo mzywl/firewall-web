@@ -64,13 +64,23 @@ class Policy(Base):
     firewall_id = Column(Integer, ForeignKey("firewalls.id"), comment="防火墙ID")
     
     # 策略字段
-    source_zone = Column(String(100), comment="源区域")
-    dest_zone = Column(String(100), comment="目标区域")
+    # 两个独立概念, 不要混:
+    # - source_system_name / dest_system_name: 业务系统名 (Excel "源端系统-环境-用途" 解析值, 如 "vas-prod-app02")
+    #   用于防火墙匹配 (ZoneAccessConfig.source_zone 是防火墙配置的"我服务的业务名")
+    # - source_zone / dest_zone: 防火墙网络 zone (internal/external, 由 firewall_matcher 查出)
+    #   ⚠ 历史: 旧版本用 source_zone 列存业务系统名, 语义混淆
+    #   本次重构 ADD: 保留 source_zone 不动, 新增 source_system_name, 旧数据 backfill 到 source_system_name
+    source_system_name = Column(String(100), comment="源系统名(业务归属,Excel 解析)")
+    dest_system_name = Column(String(100), comment="目的系统名(业务归属,Excel 解析)")
+    source_zone = Column(String(100), comment="源网络zone(firewall_matcher 查出: internal/external/zone名)")
+    dest_zone = Column(String(100), comment="目的网络zone(firewall_matcher 查出)")
     source_ip = Column(String(500), comment="源IP")
     dest_ip = Column(String(500), comment="目标IP")
     service = Column(String(500), comment="服务/端口")
     action = Column(String(50), comment="动作(permit/deny)")
-    
+    usage_time = Column(String(255), nullable=True, comment="使用时间")
+    device_source_zone = Column(String(100), nullable=True, comment="匹配到的设备源安全域")
+    device_dest_zone = Column(String(100), nullable=True, comment="匹配到的设备目的安全域")
     # 合并优化相关
     is_merged = Column(Integer, default=0, comment="是否已合并(0:否, 1:是)")
     merged_policy_id = Column(Integer, comment="合并后的策略ID")
@@ -101,7 +111,12 @@ class Firewall(Base):
     management_ip = Column(String(50), nullable=False, comment="管理IP")
     
     # 区域信息
-    region = Column(String(100), comment="所属区域")
+    region = Column(String(100), comment="所属区域(组织归属, 如 fw14.region='生产区' 表示归生产区管)")
+    # covered_region 表达 "防护区域" (技术防护范围, 跟 region 区分), 用途:
+    #   - preview.py NAT 透传时用 covered_region 当 key (入向 SNAT 转换后 src 进入 covered_region)
+    #   - 出向 SNAT 转换后 dst 进入对方 region, 查 zone_access_configs 找对方 covered_region
+    covered_region = Column(String(100), nullable=True,
+                            comment="防护区域(技术属性, NAT 透传 key; 默认=region, 边界墙可手动调整)")
     local_zone_name = Column(String(100), comment="本地防护区域名称")
     external_zone_name = Column(String(100), comment="外部防护区域名称")
     

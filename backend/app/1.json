@@ -1,0 +1,218 @@
+{
+	"0": {
+		"firewall_id": 14,
+		"firewall_name": "生产云下内网防火墙",
+		"firewall": {
+			"id": 14,
+			"name": "生产云下内网防火墙",
+			"alias": "",
+			"type": "h3c",
+			"management_ip": "10.2.2.2",
+			"region": "生产区",
+			"covered_region": "生产区",
+			"local_zone_name": "trust",
+			"external_zone_name": "untrust",
+			"is_zone_boundary": 0,
+			"auto_push": 1,
+			"push_contact": ""
+		},
+		"policies": [
+			{
+				"source_ip": "10.2.179.128",
+				"dest_ip": "10.2.130.214-10.2.130.215",
+				"service": "1521",
+				"action": "permit",
+				"firewall": null,
+				"direction": "outbound",
+				"not_pushed_reason": null,
+				"usage_time": "长期",
+				"使用时间": "长期",
+				"original_policy_id": 164,
+				"source_system_name": "vas-prod-app02",
+				"dest_system_name": "估值2.6数据库",
+				"nat_info": {
+					"need_nat": false,
+					"nat_type": null,
+					"snat_address": null,
+					"dnat_address": null,
+					"source_zone": "internal",
+					"dest_zone": "external",
+					"source_zone_name": "trust",
+					"dest_zone_name": "untrust",
+					"warnings": []
+				},
+				"pass_through": null,
+				"original_data": {
+					"source_system_name": "vas-prod-app02",
+					"dest_system_name": "估值2.6数据库"
+				},
+				"sequence": 1,
+				"nat_policies": []
+			},
+			{
+				"source_ip": "10.2.179.127\n10.2.179.128\n10.2.179.129",
+				"dest_ip": "10.1.192.16\n10.1.192.204\n10.2.129.80",
+				"service": "138-139,445",
+				"action": "permit",
+				"firewall": null,
+				"direction": "outbound",
+				"not_pushed_reason": null,
+				"usage_time": "长期",
+				"使用时间": "长期",
+				"original_policy_id": 171,
+				"source_system_name": "vas-prod-app01",
+				"dest_system_name": "落地文件共享服务器",
+				"nat_info": {
+					"need_nat": false,
+					"nat_type": null,
+					"snat_address": null,
+					"dnat_address": null,
+					"source_zone": "internal",
+					"dest_zone": "external",
+					"source_zone_name": "trust",
+					"dest_zone_name": "untrust",
+					"warnings": []
+				},
+				"pass_through": null,
+				"original_data": {
+					"source_system_name": "vas-prod-app01",
+					"dest_system_name": "落地文件共享服务器"
+				},
+				"sequence": 2,
+				"nat_policies": []
+			},
+			{
+				"source_ip": "10.2.179.130",
+				"dest_ip": "10.1.192.16\n10.1.192.204\n10.2.129.80\n10.2.156.36",
+				"service": "138-139,445",
+				"action": "permit",
+				"firewall": null,
+				"direction": "outbound",
+				"not_pushed_reason": null,
+				"usage_time": "长期",
+				"使用时间": "长期",
+				"original_policy_id": 174,
+				"source_system_name": "vas-prod-app04",
+				"dest_system_name": "落地文件共享服务器",
+				"nat_info": {
+					"need_nat": false,
+					"nat_type": null,
+					"snat_address": null,
+					"dnat_address": null,
+					"source_zone": "internal",
+					"dest_zone": "external",
+					"source_zone_name": "trust",
+					"dest_zone_name": "untrust",
+					"warnings": []
+				},
+				"pass_through": null,
+				"original_data": {
+					"source_system_name": "vas-prod-app04",
+					"dest_system_name": "落地文件共享服务器"
+				},
+				"sequence": 3,
+				"nat_policies": []
+			},
+			{
+				"source_ip": "10.2.179.130",
+				"dest_ip": "192.101.64.2",
+				"service": "138-139,445",
+				"action": "permit",
+				"firewall": null,
+				"direction": "outbound",
+				"not_pushed_reason": null,
+				"usage_time": "2026/12/31",
+				"使用时间": "2026/12/31",
+				"original_policy_id": 175,
+				"source_system_name": "vas-prod-app04",
+				"dest_system_name": "落地文件共享服务器",
+				"nat_info": {
+					"need_nat": false,
+					"nat_type": null,
+					"snat_address": null,
+					"dnat_address": null,
+					"source_zone": "internal",
+					"dest_zone": "external",
+					"source_zone_name": "trust",
+					"dest_zone_name": "untrust",
+					"warnings": []
+				},
+				"pass_through": null,
+				"original_data": {
+					"source_system_name": "vas-prod-app04",
+					"dest_system_name": "落地文件共享服务器"
+				},
+				"sequence": 4,
+				"nat_policies": []
+			},
+			{
+				"source_ip": "10.1.137.137\n192.101.64.2",
+				"dest_ip": "10.2.179.130",
+				"service": "138-139,445",
+				"action": "permit",
+				"firewall": null,
+				"direction": "inbound",
+				"not_pushed_reason": null,
+				"usage_time": "2026/12/31",
+				"使用时间": "2026/12/31",
+				"original_policy_id": 177,
+				"source_system_name": "vas-prod-app04",
+				"dest_system_name": "落地文件共享服务器",
+				"nat_info": {
+					"need_nat": false,
+					"nat_type": null,
+					"snat_address": null,
+					"dnat_address": null,
+					"source_zone": "external",
+					"dest_zone": "internal",
+					"source_zone_name": "untrust",
+					"dest_zone_name": "trust",
+					"warnings": []
+				},
+				"pass_through": {
+					"translated_src_ip": "10.223.32.1",
+					"translated_dst_ip": null,
+					"source_zone": "internal",
+					"dest_zone": "internal",
+					"via_firewall": {
+						"id": 6,
+						"name": "生产测试边界防火墙"
+					}
+				},
+				"original_data": {
+					"source_system_name": "vas-prod-app04",
+					"dest_system_name": "落地文件共享服务器"
+				},
+				"pass_through_list": [
+					{
+						"translated_src_ip": "10.223.32.1",
+						"translated_dst_ip": null,
+						"source_zone": "internal",
+						"dest_zone": "internal",
+						"via_firewall": {
+							"id": 6,
+							"name": "生产测试边界防火墙"
+						}
+					}
+				],
+				"sequence": 5,
+				"nat_policies": [
+					{
+						"type": "PASS_THROUGH",
+						"source_zone": "untrust",
+						"source_ip": "10.223.32.1",
+						"dest_zone": "trust",
+						"dest_ip": "10.2.179.130",
+						"service": "138-139,445",
+						"action": "permit",
+						"via_firewall": {
+							"id": 6,
+							"name": "生产测试边界防火墙"
+						}
+					}
+				]
+			}
+		]
+	}
+}
+{"policies": [{"\u6e90\u7aef\u7cfb\u7edf-\u73af\u5883-\u7528\u9014": "\u5730\u65b9\u76d1\u7ba1\u62a5\u9001\u5e73\u53f0-\u751f\u4ea7-\u4e0a\u6d77\u5e94\u752801", "\u6e90IP": "10.2.179.34", "\u76ee\u7684\u7aef\u7cfb\u7edf-\u73af\u5883-\u7528\u9014": "EAST\u62a5\u9001\u7cfb\u7edf-\u751f\u4ea7-\u6570\u636e\u5e93", "\u76ee\u7684IP": "192.101.66.3", "\u76ee\u7684\u7aef\u53e3": 25308, "\u7528\u9014": "\u5e94\u7528\u8bbf\u95ee\u6570\u636e\u5e93", "\u7b56\u7565\u4f7f\u7528\u76ee\u7684": "\u7528\u4e8e\u751f\u4ea7\u76ee\u7684", "\u4f7f\u7528\u65f6\u95f4": "\u957f\u671f", "\u5907\u6ce8": "\u5e94\u7528-\u6570\u636e\u5e93", "_row_number": 15}, {"\u6e90\u7aef\u7cfb\u7edf-\u73af\u5883-\u7528\u9014": "\u5730\u65b9\u76d1\u7ba1\u62a5\u9001\u5e73\u53f0-\u751f\u4ea7-\u5e7f\u4e1c\u5e94\u752801", "\u6e90IP": "10.2.179.34", "\u76ee\u7684\u7aef\u7cfb\u7edf-\u73af\u5883-\u7528\u9014": "EAST\u62a5\u9001\u7cfb\u7edf-\u751f\u4ea7-\u6570\u636e\u5e93", "\u76ee\u7684IP": "10.2.140.254", "\u76ee\u7684\u7aef\u53e3": 25308, "\u7528\u9014": "\u5e94\u7528\u8bbf\u95ee\u6570\u636e\u5e93", "\u7b56\u7565\u4f7f\u7528\u76ee\u7684": "\u7528\u4e8e\u751f\u4ea7\u76ee\u7684", "\u4f7f\u7528\u65f6\u95f4": "\u957f\u671f", "\u5907\u6ce8": "\u5e94\u7528-\u6570\u636e\u5e93", "_row_number": 16}]}

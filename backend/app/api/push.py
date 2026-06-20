@@ -14,18 +14,20 @@
 - GET  /api/push/snapshots                      全部快照（分页）
 """
 import json
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.policy_merger import PolicyMerger
+from app.core.policy_splitter_v2 import PolicySplitterV2
 from app.database import get_db
 from app.models import (
     Firewall,
     Order,
     OrderStatus,
     Policy,
+    PolicyVersion,
     PushedPolicyItem,
     PushedPolicySnapshot,
     PushLog,
@@ -398,3 +400,180 @@ def list_snapshots(
             for s in snaps
         ],
     }
+
+
+# ============================================================
+# 本地生成推送脚本（不连设备、不复用现有对象、不写快照）
+# ============================================================
+
+@router.post("/orders/{order_id}/generate-script")
+def generate_push_script(
+    order_id: int,
+    firewall_id: int = Query(..., description="目标防火墙 ID"),
+    db: Session = Depends(get_db),
+):
+    """本地生成推送到指定防火墙的 CLI 命令脚本（dry-run / 预览用）
+
+    设计前提:
+      - 假设设备上没有可复用的地址/服务/时间对象 → 全部新建
+      - 走 PolicySplitterV2 把多 IP 策略拆成单 IP 策略
+      - 只保留命中本防火墙 (firewall_id) 的策略
+      - 同一 (src_ip, dst_ip, port) 只生成一次对象
+
+    不会做:
+      - SSH 连接设备
+      - 拉取/解析设备配置
+      - 走 PolicyMatcher 复用现有对象
+      - 创建 PushedPolicySnapshot / 写 PushedPolicyItem
+      - 改任何 DB 状态（只读）
+
+    返回: { success, firewall, order, stats, new_policies, commands, skipped }
+    """
+    order = db.query(Order).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="工单不存在")
+    fw = db.query(Firewall).filter(Firewall.id == firewall_id).first()
+    if not fw:
+        raise HTTPException(status_code=404, detail="防火墙不存在")
+    if not order.policies:
+        raise HTTPException(status_code=400, detail="工单没有可生成的策略")
+
+    # 1. 校验设备类型有 client 实现
+    fw_type = fw.type.value if hasattr(fw.type, "value") else str(fw.type)
+    try:
+        get_client_class(fw_type)
+    except NotImplementedError as e:
+        raise HTTPException(status_code=501, detail=str(e))
+
+    # 2. 创建 client（不连接 — host/user/pass 传空也安全，base.__init__ 不主动 connect）
+    client = create_client(
+        device_type=fw_type,
+        host=fw.management_ip or "",
+        username="",
+        password="",
+        port=22,
+        timeout=5,
+    )
+
+    # 2.5 加载 user_modified 快照, 按 policy.id 索引"使用时间"
+    # "使用时间" 不在 Policy 表 (只在 user_modified 快照), 之前硬编码 "长期",
+    # 现在透传到 valid_until 字段, generate_commands 自动生成 time-range/schedule 命令
+    usage_time_by_id: dict[int, str] = {}
+    user_modified_version = db.query(PolicyVersion).filter(
+        PolicyVersion.order_id == order_id,
+        PolicyVersion.version_type == 'user_modified',
+    ).first()
+    if user_modified_version:
+        for p_dict in user_modified_version.data.get('policies', []):
+            pid = p_dict.get('id')
+            ut = p_dict.get('使用时间', '')
+            if pid is not None:
+                usage_time_by_id[pid] = ut
+
+    # 3. 拆分 + 过滤本防火墙命中的策略
+    splitter = PolicySplitterV2(db)
+    new_policies: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    seen: set = set()  # 防 (src, dst, port) 重复建对象
+
+    for p in order.policies:
+        single = splitter.split_policy_to_single_ips(
+            p.source_ip or "",
+            p.dest_ip or "",
+            p.service or "",
+            p.action or "permit",
+        )
+        print (p)
+        for idx, sp in enumerate(single):
+            if sp["not_pushed_reason"]:
+                skipped.append({
+                    "policy_id": p.id,
+                    "source_ip": sp["source_ip"],
+                    "dest_ip": sp["dest_ip"],
+                    "reason": sp["not_pushed_reason"],
+                })
+                continue
+            if sp["firewall"] is None or sp["firewall"].id != firewall_id:
+                # 不归本防火墙管
+                continue
+
+            # 去重: 同一对 (src, dst, port) 只算一条
+            ports = (p.service or "").split() if p.service else []
+            dedup_key = (sp["source_ip"], sp["dest_ip"], "|".join(ports))
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+
+            new_policies.append({
+                "policy_id": p.id,
+                "rule_name": f"O{order.order_no}-P{p.id}-{idx}",
+                "src_ips": [sp["source_ip"]],
+                "dst_ips": [sp["dest_ip"]],
+                "ports": ports,
+                "valid_until": _normalize_valid_until(usage_time_by_id.get(p.id, "长期")),
+                "src_zone": p.device_source_zone or "any",
+                "dst_zone": p.device_dest_zone or "any",
+                "action": p.action or "permit",
+            })
+
+    # 4. 生成命令
+    try:
+        commands = client.generate_commands(
+            new_policies=new_policies,
+            existing_addresses=[],
+            existing_services=[],
+            existing_schedules=[],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"生成命令失败: {e}")
+
+    return {
+        "success": True,
+        "firewall": {
+            "id": fw.id,
+            "name": fw.name,
+            "type": fw_type,
+            "management_ip": fw.management_ip,
+        },
+        "order": {
+            "id": order.id,
+            "order_no": order.order_no,
+            "title": order.title,
+        },
+        "stats": {
+            "total_order_policies": len(order.policies),
+            "to_push": len(new_policies),
+            "skipped": len(skipped),
+            "commands": len(commands),
+        },
+        "new_policies": new_policies,
+        "commands": commands,
+        "skipped": skipped,
+    }
+
+
+def _normalize_valid_until(raw: str) -> str:
+    """标准化"使用时间"字段为 generate_commands 能识别的 valid_until 格式
+
+    接受的格式 (来自 user_modified 快照的"使用时间" 字段):
+      - 空 / 空白 / "长期" → "长期" (不生成 time-range/schedule)
+      - "YYYY-MM-DD" / "YYYY/MM/DD" / "YYYY.MM.DD" → "YYYY-MM-DD" (生成 time-range)
+      - 其它不规范 ("6个月", "测试_时间_25", ...) → 兜底 "长期" (不生成, 避免设备拒绝)
+
+    H3C 的 _gen_schedule_object 用 replace("/", "-") 兼容两种,
+    Fortigate 的 _build_fortigate_schedule_block 用 replace("-", "/").
+    这里统一输出 "YYYY-MM-DD" 中间分隔符, 两家都兼容.
+    """
+    if not raw:
+        return "长期"
+    raw = raw.strip()
+    if not raw or raw == "长期":
+        return "长期"
+    # 尝试识别日期: 4位年 + 分隔符 + 1-2位月 + 分隔符 + 1-2位日
+    import re
+    m = re.match(r'^(\d{4})[\-/.](\d{1,2})[\-/.](\d{1,2})$', raw)
+    if m:
+        y, mo, d = m.groups()
+        return f"{y}-{int(mo):02d}-{int(d):02d}"
+    # 兜底: 不规范格式按"长期"处理, 避免推到设备时被拒绝
+    return "长期"
