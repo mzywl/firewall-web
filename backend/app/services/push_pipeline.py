@@ -81,8 +81,10 @@ class PushPipeline:
         mode: str = "deduplicate",
         db: Optional[Session] = None,
     ):
-        if mode not in ("deduplicate", "force_push"):
-            raise ValueError(f"mode 必须是 'deduplicate' / 'force_push', got {mode!r}")
+        if mode not in ("deduplicate", "force_push", "reuse_objects"):
+            raise ValueError(
+                f"mode 必须是 'deduplicate' / 'force_push' / 'reuse_objects', got {mode!r}"
+            )
 
         self.order_id = order_id
         self.firewall_id = firewall_id

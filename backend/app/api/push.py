@@ -172,16 +172,17 @@ def test_connection(firewall_id: int, db: Session = Depends(get_db)):
 def start_push_v2(
     order_id: int,
     firewall_id: int = Query(..., description="目标防火墙 ID"),
-    mode: str = Query("deduplicate", description="deduplicate / force_push"),
+    mode: str = Query("deduplicate", description="deduplicate / force_push / reuse_objects"),
     db: Session = Depends(get_db),
 ):
     """启动 v2 推送（同步执行；如要异步走 Celery 调用 /tasks/push_v2_task）
 
     注意：当前是同步执行（方便调试和测试）；真要异步化需要把 run() 拆到 Celery。
     """
-    if mode not in ("deduplicate", "force_push"):
+    if mode not in ("deduplicate", "force_push", "reuse_objects"):
         raise HTTPException(
-            status_code=400, detail=f"mode 必须是 'deduplicate' / 'force_push', got {mode!r}",
+            status_code=400,
+            detail=f"mode 必须是 'deduplicate' / 'force_push' / 'reuse_objects', got {mode!r}",
         )
     order = db.query(Order).filter(Order.id == order_id).first()
     if not order:

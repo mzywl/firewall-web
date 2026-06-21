@@ -62,34 +62,23 @@ class Policy(Base):
     id = Column(Integer, primary_key=True, index=True)
     order_id = Column(Integer, ForeignKey("orders.id"), nullable=False, comment="工单ID")
     firewall_id = Column(Integer, ForeignKey("firewalls.id"), comment="防火墙ID")
-    
-    # 策略字段
-    # 两个独立概念, 不要混:
-    # - source_system_name / dest_system_name: 业务系统名 (Excel "源端系统-环境-用途" 解析值, 如 "vas-prod-app02")
-    #   用于防火墙匹配 (ZoneAccessConfig.source_zone 是防火墙配置的"我服务的业务名")
-    # - source_zone / dest_zone: 防火墙网络 zone (internal/external, 由 firewall_matcher 查出)
-    #   ⚠ 历史: 旧版本用 source_zone 列存业务系统名, 语义混淆
-    #   本次重构 ADD: 保留 source_zone 不动, 新增 source_system_name, 旧数据 backfill 到 source_system_name
     source_system_name = Column(String(100), comment="源系统名(业务归属,Excel 解析)")
     dest_system_name = Column(String(100), comment="目的系统名(业务归属,Excel 解析)")
-    source_zone = Column(String(100), comment="源网络zone(firewall_matcher 查出: internal/external/zone名)")
-    dest_zone = Column(String(100), comment="目的网络zone(firewall_matcher 查出)")
+    source_snat_ip =Column(String(500),comment="源SNATIP")
     source_ip = Column(String(500), comment="源IP")
     dest_ip = Column(String(500), comment="目标IP")
     service = Column(String(500), comment="服务/端口")
-    action = Column(String(50), comment="动作(permit/deny)")
+    action = Column(String(50), comment="动作(permit/deny/pass)")
     usage_time = Column(String(255), nullable=True, comment="使用时间")
     device_source_zone = Column(String(100), nullable=True, comment="匹配到的设备源安全域")
     device_dest_zone = Column(String(100), nullable=True, comment="匹配到的设备目的安全域")
     # 合并优化相关
     is_merged = Column(Integer, default=0, comment="是否已合并(0:否, 1:是)")
     merged_policy_id = Column(Integer, comment="合并后的策略ID")
-    
     # 推送状态
     push_status = Column(String(50), comment="推送状态")
     push_result = Column(Text, comment="推送结果")
     pushed_at = Column(DateTime, comment="推送时间")
-    
     created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment="更新时间")
     
@@ -241,9 +230,10 @@ class ZoneAccessRule(Base):
 
 
 class PushMode(str, enum.Enum):
-    """推送模式"""
-    deduplicate = "deduplicate"  # 查重模式：复用整条 + 复用对象
-    force_push = "force_push"    # 全推模式：只复用对象，整条必新建
+    """推送模式 (重构.md §3 三 mode 隔离)"""
+    deduplicate = "deduplicate"  # 查重模式: 复用整条 + 复用对象 (4 维 HASH 命中 → REUSED 跳过)
+    force_push = "force_push"    # 全推模式: 对象可能复用 + 整条必新建
+    reuse_objects = "reuse_objects"  # 对象复用模式: 复用对象 + 整条必新建 (跟 force_push 区别在语义, 未来 client 差异化)
 
 
 class PushSnapshotStatus(str, enum.Enum):
