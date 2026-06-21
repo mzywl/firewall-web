@@ -83,6 +83,7 @@ def sample_firewall(db_session):
         external_protected_ips='192.168.0.0/16',
         is_zone_boundary=1,
         auto_push=0,
+        outbound_snat_pool='172.16.99.1',  # conftest 测试 fixture, 配 SNAT 池让 nat_type=SNAT
     )
     db_session.add(fw)
     db_session.commit()
@@ -114,9 +115,9 @@ def sample_policy(db_session, sample_firewall):
 
     policy = Policy(
         order_id=order.id,
-        source_zone='内网',
+        source_system_name='内网',
         source_ip='10.1.1.0/24',
-        dest_zone='DMZ',
+        dest_system_name='DMZ',
         dest_ip='192.168.1.10',
         service='443',
         action='permit',
