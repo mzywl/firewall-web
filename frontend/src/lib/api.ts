@@ -181,19 +181,6 @@ export const startPush = async (orderId: number): Promise<{ message: string; tas
   return data;
 };
 
-// 策略合并分析
-export const mergePolicies = async (orderId: number): Promise<{
-  message: string;
-  original_count: number;
-  merged_count: number;
-  redundant_count: number;
-  redundant_ids: number[];
-  merged_policies: Policy[];
-}> => {
-  const { data } = await api.post(`/api/push/orders/${orderId}/merge`);
-  return data;
-};
-
 // 获取推送状态
 export const getPushStatus = async (orderId: number): Promise<PushStatus> => {
   const { data } = await api.get<PushStatus>(`/api/push/orders/${orderId}/status`);

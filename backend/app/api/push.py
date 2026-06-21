@@ -2,7 +2,6 @@
 
 旧端点（保留兼容）:
 - POST /api/push/orders/{order_id}/start        启动推送（不带 firewall_id）
-- POST /api/push/orders/{order_id}/merge        合并分析
 - GET  /api/push/orders/{order_id}/status       推送状态
 
 新端点（v2 推送流水线）:
@@ -19,7 +18,6 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.core.policy_merger import PolicyMerger
 from app.core.policy_splitter_v2 import PolicySplitterV2
 from app.database import get_db
 from app.models import (
@@ -68,35 +66,6 @@ def start_push(order_id: int, db: Session = Depends(get_db)):
         "task_id": task.id,
         "order_id": order_id,
         "policies_count": policies_count,
-    }
-
-
-@router.post("/orders/{order_id}/merge")
-def merge_policies(order_id: int, db: Session = Depends(get_db)):
-    """合并优化策略（保留旧逻辑）"""
-    order = db.query(Order).filter(Order.id == order_id).first()
-    if not order:
-        raise HTTPException(status_code=404, detail="工单不存在")
-    policies = db.query(Policy).filter(Policy.order_id == order_id).all()
-    if not policies:
-        raise HTTPException(status_code=400, detail="没有可合并的策略")
-    policies_data = [
-        {
-            'id': p.id, 'source_ip': p.source_ip, 'dest_ip': p.dest_ip,
-            'service': p.service, 'action': p.action,
-        }
-        for p in policies
-    ]
-    merger = PolicyMerger()
-    merged_data = merger.merge_policies(policies_data)
-    redundant_ids = merger.detect_redundant(policies_data)
-    return {
-        "message": "策略合并分析完成",
-        "original_count": len(policies),
-        "merged_count": len(merged_data),
-        "redundant_count": len(redundant_ids),
-        "redundant_ids": redundant_ids,
-        "merged_policies": merged_data,
     }
 
 
