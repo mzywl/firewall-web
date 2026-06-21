@@ -107,7 +107,6 @@ class NATAnalyzer:
                 else:
                     result["snat_address"] = firewall.inbound_snat_pool
                     result["warnings"].append("外部未知网络入向访问，默认采用入向 SNAT 地址池兜底")
-
             # 如果边界墙触发了 SNAT 但地址池缺失，强制挂起状态，提示人工补配
             if result["need_nat"] and not result["snat_address"]:
                 result["nat_type"] = None
