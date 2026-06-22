@@ -145,9 +145,10 @@ export default function FirewallZones() {
   };
 
   // 设计文档 §1: 显式 zone_role, 替代旧 connect_region 隐式判定
+  // 显示用 zone_name 实际值 (用户自由命名), role 只决定颜色
   const roleBadge = (z: FirewallZone) => z.zone_role === 'internal'
-    ? <Badge>内部 (Trust)</Badge>
-    : <Badge variant="outline">外部 (Untrust)</Badge>;
+    ? <Badge className="bg-blue-500" title="内部防护域">{z.zone_name} · 内部</Badge>
+    : <Badge className="bg-orange-500" title="外部防护域">{z.zone_name} · 外部</Badge>;
 
   return (
     <div className="container mx-auto p-6 max-w-5xl">
@@ -284,7 +285,7 @@ export default function FirewallZones() {
                 <div>
                   <label className="block text-sm font-medium mb-1">
                     zone 角色 *
-                    <span className="text-xs text-gray-500 ml-2">(设计文档 §1: 显式标记 internal / external)</span>
+                    <span className="text-xs text-gray-500 ml-2">(设计文档 §1: 内部防护 / 外部防护 二选一)</span>
                   </label>
                   <select
                     required
@@ -292,11 +293,12 @@ export default function FirewallZones() {
                     value={formData.zone_role}
                     onChange={(e) => setFormData({ ...formData, zone_role: e.target.value as 'internal' | 'external' })}
                   >
-                    <option value="internal">internal (内部防护域 / Trust — 保护自家资产)</option>
-                    <option value="external">external (外部防护域 / Untrust — 通往其他大区/墙)</option>
+                    <option value="internal">internal (内部防护域 — 保护自家资产, 来自本防火墙归属大区的方向)</option>
+                    <option value="external">external (外部防护域 — 通往其他大区或墙的出口方向)</option>
                   </select>
                   <p className="text-xs text-gray-500 mt-1">
-                    显式角色, chain_planner 优先使用 (替代旧 connect_region 隐式判定)
+                    两个维度: <b>zone_name</b> 你自由命名 (Trust / Untrust / DMZ / 自定义均可),
+                    <b>zone_role</b> 系统内部/外部语义 (决定 chain_planner 寻路方向)
                   </p>
                 </div>
                 <div>
