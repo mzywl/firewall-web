@@ -1,3 +1,46 @@
+"""SQLAlchemy 数据库模型 — 严格对齐 重构.md §1 spec
+
+重构时间: 2026-06-22
+重构背景: 旧实现累积了迁移 007-012 期间的多处字段 (covered_region, internal_protected_ips,
+          outbound_snat_pool 等), 这些字段在 重构.md spec 中不存在。本次按新设计统一清理。
+
+spec 字段集合 (参见 重构.md §1):
+  - firewalls: id/name/alias/type/management_ip/belong_region/is_zone_boundary/
+               connection_type/connection_config/auto_push/status/is_active/created_at/updated_at
+  - firewall_zones: id/firewall_id/zone_name/protected_ips/connect_region/created_at/updated_at
+  - zone_access_configs: id/firewall_id/source_region/dest_region/
+                         boundary_source_zone/boundary_dest_zone/need_nat/snat_pool/
+                         description/created_at/updated_at
+  - orders: id/order_no/title/description/excel_file_path/status/created_by/
+            created_at/updated_at/policies
+  - policies: id/order_id/firewall_id/source_ip/dest_ip/service/usage_time/
+              source_system_name/dest_system_name/device_source_zone/device_dest_zone/
+              source_snat_ip/push_status/push_result/pushed_at/created_at
+  - policy_versions: id/order_id/version_type/data/created_at
+  - pushed_policy_snapshots: id/order_id/firewall_id/batch_id/push_mode/status/
+                             total/new/reused/failed_policies/
+                             fetched_addresses/services/policies_json/
+                             error_log/started_at/finished_at/items/logs/order/firewall
+  - pushed_policy_items: id/snapshot_id/policy_id/match_key/
+                         device_src/dst/svc/sched_obj/device_policy_id/action/raw_commands/error_msg
+  - push_logs: id/snapshot_id/seq/stage/level/message/data_json/created_at
+
+已删除 (旧实现有, spec 明确不要):
+  - OperationLog 表 (不在 spec)
+  - ZoneAccessRule 表 (不在 spec)
+  - Firewall: covered_region, local_zone_name, external_zone_name,
+              internal_protected_ips, external_protected_ips, supported_policy_types,
+              outbound_snat_pool, inbound_snat_pool, allow_same_firewall_push,
+              push_contact, push_remark, remark, region(→belong_region)
+  - FirewallZone: description (新增 connect_region)
+  - ZoneAccessConfig: created_by (重命名 source_zone→source_region, dest_zone→dest_region, 加 boundary_* / need_nat / snat_pool)
+  - Order: logs 关系 (OperationLog 已删)
+  - Policy: action, is_merged, merged_policy_id, updated_at
+  - PushedPolicySnapshot: appended_policies, created_at
+  - PushedPolicyItem: order_id, firewall_id, src_addr_key, dst_addr_key,
+                      service_key, schedule_key, device_policy_name, created_at
+  - ConnectionType 枚举: cli, manual (spec 只留 ssh, api)
+"""
 from sqlalchemy import Column, Integer, String, Text, DateTime, Enum, ForeignKey, JSON
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -5,235 +48,39 @@ from app.database import Base
 import enum
 
 
+# ==========================================
+# 枚举类型
+# ==========================================
+
 class OrderStatus(str, enum.Enum):
     """工单状态"""
-    pending = "pending"  # 待处理
-    processing = "processing"  # 处理中
-    completed = "completed"  # 已完成
-    failed = "failed"  # 失败
+    pending = "pending"
+    processing = "processing"
+    completed = "completed"
+    failed = "failed"
 
 
 class FirewallType(str, enum.Enum):
-    """防火墙类型"""
+    """防火墙厂商类型 (重构.md §1 精简后)"""
     fortigate = "fortigate"
-    hillstone = "hillstone"
-    leadsec = "leadsec"
+    huawei = "huawei"
     h3c = "h3c"
-    guanqun = "guanqun"  # 冠群
-    feita = "feita"  # 飞塔
-    wangshen = "wangshen"  # 网神
-    sangfor = "sangfor"  # 深信服
-    huawei = "huawei"  # 华为
-    shanshi = "shanshi"  # 山石
-    other = "other"  # 其他
+    hillstone = "hillstone"
+    sangfor = "sangfor"
+    other = "other"
 
 
 class ConnectionType(str, enum.Enum):
-    """连接方式"""
+    """连接方式 (重构.md §1 只保留 ssh/api)"""
     ssh = "ssh"
     api = "api"
-    cli = "cli"
-    manual = "manual"
-
-
-class Order(Base):
-    """工单表"""
-    __tablename__ = "orders"
-
-    id = Column(Integer, primary_key=True, index=True)
-    order_no = Column(String(50), unique=True, index=True, nullable=False, comment="工单编号")
-    title = Column(String(200), nullable=False, comment="工单标题")
-    description = Column(Text, comment="工单描述")
-    excel_file_path = Column(String(500), comment="Excel文件路径")
-    status = Column(Enum(OrderStatus), default=OrderStatus.pending, comment="工单状态")
-    created_by = Column(String(100), comment="创建人")
-    created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment="更新时间")
-    
-    # 关联关系
-    policies = relationship("Policy", back_populates="order", cascade="all, delete-orphan")
-    logs = relationship("OperationLog", back_populates="order", cascade="all, delete-orphan")
-
-
-class Policy(Base):
-    """策略表"""
-    __tablename__ = "policies"
-
-    id = Column(Integer, primary_key=True, index=True)
-    order_id = Column(Integer, ForeignKey("orders.id"), nullable=False, comment="工单ID")
-    firewall_id = Column(Integer, ForeignKey("firewalls.id"), comment="防火墙ID")
-    source_system_name = Column(String(100), comment="源系统名(业务归属,Excel 解析)")
-    dest_system_name = Column(String(100), comment="目的系统名(业务归属,Excel 解析)")
-    source_snat_ip =Column(String(500),comment="源SNATIP")
-    source_ip = Column(String(500), comment="源IP")
-    dest_ip = Column(String(500), comment="目标IP")
-    service = Column(String(500), comment="服务/端口")
-    action = Column(String(50), comment="动作(permit/deny/pass)")
-    usage_time = Column(String(255), nullable=True, comment="使用时间")
-    device_source_zone = Column(String(100), nullable=True, comment="匹配到的设备源安全域")
-    device_dest_zone = Column(String(100), nullable=True, comment="匹配到的设备目的安全域")
-    # 合并优化相关
-    is_merged = Column(Integer, default=0, comment="是否已合并(0:否, 1:是)")
-    merged_policy_id = Column(Integer, comment="合并后的策略ID")
-    # 推送状态
-    push_status = Column(String(50), comment="推送状态")
-    push_result = Column(Text, comment="推送结果")
-    pushed_at = Column(DateTime, comment="推送时间")
-    created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment="更新时间")
-    
-    # 关联关系
-    order = relationship("Order", back_populates="policies")
-    firewall = relationship("Firewall")
-
-
-class Firewall(Base):
-    """防火墙配置表"""
-    __tablename__ = "firewalls"
-
-    id = Column(Integer, primary_key=True, index=True)
-    
-    # 基础信息
-    name = Column(String(200), nullable=False, comment="防火墙名称")
-    alias = Column(String(100), comment="简称/别名")
-    type = Column(Enum(FirewallType), nullable=False, comment="防火墙类型")
-    management_ip = Column(String(50), nullable=False, comment="管理IP")
-    
-    # 区域信息
-    region = Column(String(100), comment="所属区域(组织归属, 如 fw14.region='生产区' 表示归生产区管)")
-    # covered_region 表达 "防护区域" (技术防护范围, 跟 region 区分), 用途:
-    #   - preview.py NAT 透传时用 covered_region 当 key (入向 SNAT 转换后 src 进入 covered_region)
-    #   - 出向 SNAT 转换后 dst 进入对方 region, 查 zone_access_configs 找对方 covered_region
-    covered_region = Column(String(100), nullable=True,
-                            comment="防护区域(技术属性, NAT 透传 key; 默认=region, 边界墙可手动调整)")
-    local_zone_name = Column(String(100), comment="本地防护区域名称")
-    external_zone_name = Column(String(100), comment="外部防护区域名称")
-    
-    # 连接方式
-    connection_type = Column(Enum(ConnectionType), nullable=False, default=ConnectionType.ssh, comment="连接类型")
-    connection_config = Column(JSON, comment="连接配置(根据type存不同结构)")
-    
-    # 防护范围（分内部和外部）
-    internal_protected_ips = Column(Text, comment="内部防护IP段，每行一个")
-    external_protected_ips = Column(Text, comment="外部防护IP段，每行一个")
-    # 是否区域边界防火墙：跨区域流量的 NAT 转换仅在这类防火墙上需要
-    is_zone_boundary = Column(Integer, default=0, comment="是否区域边界防火墙(0:否, 1:是)；仅边界防火墙需配 NAT 地址池")
-    # supported_policy_types 字段保留以兼容旧数据，UI 不再使用
-    supported_policy_types = Column(JSON, comment="支持的策略类型数组（已废弃，UI 隐藏）")
-
-    # SNAT 地址池（仅当 is_zone_boundary=1 时由 UI 显示和填写）
-    # 项目已决定不再分析 DNAT，所以只保留 SNAT 相关字段
-    outbound_snat_pool = Column(Text, comment="出向SNAT地址段/地址池名称")
-    inbound_snat_pool = Column(Text, comment="入向SNAT地址段/地址池名称")
-    
-    # 推送配置
-    auto_push = Column(Integer, default=1, comment="是否支持自动推送(0:否, 1:是)")
-    allow_same_firewall_push = Column(Integer, default=0, comment="是否允许同墙推送（源目的IP都在内部IP段时）(0:否, 1:是)")
-    push_contact = Column(String(100), comment="推送责任人")
-    push_remark = Column(Text, comment="推送备注")
-    
-    # 状态和备注
-    status = Column(String(20), default="enabled", comment="状态(enabled/disabled)")
-    remark = Column(Text, comment="备注")
-    
-    is_active = Column(Integer, default=1, comment="是否启用(0:否, 1:是)")
-    created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment="更新时间")
-    
-    # 关联关系
-    zones = relationship("FirewallZone", back_populates="firewall", cascade="all, delete-orphan")
-
-
-class OperationLog(Base):
-    """操作日志表"""
-    __tablename__ = "operation_logs"
-
-    id = Column(Integer, primary_key=True, index=True)
-    order_id = Column(Integer, ForeignKey("orders.id"), comment="工单ID")
-    operation_type = Column(String(50), nullable=False, comment="操作类型")
-    operation_detail = Column(Text, comment="操作详情")
-    operator = Column(String(100), comment="操作人")
-    result = Column(String(50), comment="操作结果(success/failed)")
-    error_message = Column(Text, comment="错误信息")
-    created_at = Column(DateTime, default=datetime.utcnow, comment="操作时间")
-    
-    # 关联关系
-    order = relationship("Order", back_populates="logs")
-
-
-class PolicyVersion(Base):
-    """策略版本表"""
-    __tablename__ = "policy_versions"
-
-    id = Column(Integer, primary_key=True, index=True)
-    order_id = Column(Integer, ForeignKey("orders.id"), nullable=False, index=True, comment="工单ID")
-    version_type = Column(String(20), nullable=False, comment="版本类型: original/formatted/user_modified")
-    data = Column(JSON, nullable=False, comment="策略数据(JSON格式)")
-    created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
-    
-    # 关联关系
-    order = relationship("Order")
-
-
-class ZoneAccessConfig(Base):
-    """区域访问配置表（仅记录区域关系,不再带 nat_type 字段:项目已取消 DNAT 分析）"""
-    __tablename__ = "zone_access_configs"
-
-    id = Column(Integer, primary_key=True, index=True)
-    source_zone = Column(String(100), nullable=False, comment="源区域")
-    dest_zone = Column(String(100), nullable=False, comment="目的区域")
-    firewall_id = Column(Integer, ForeignKey("firewalls.id"), nullable=False, comment="防火墙ID")
-    description = Column(Text, comment="配置说明")
-    created_by = Column(String(100), comment="创建人")
-    created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment="更新时间")
-
-    # 关联关系
-    firewall = relationship("Firewall")
-
-
-class FirewallZone(Base):
-    """防火墙区域表"""
-    __tablename__ = "firewall_zones"
-
-    id = Column(Integer, primary_key=True, index=True)
-    firewall_id = Column(Integer, ForeignKey("firewalls.id"), nullable=False, comment="防火墙ID")
-    zone_name = Column(String(100), nullable=False, comment="区域名称")
-    protected_ips = Column(Text, comment="保护的IP段（每行一个网段）")
-    description = Column(Text, comment="区域描述")
-    created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment="更新时间")
-    
-    # 关联关系
-    firewall = relationship("Firewall", back_populates="zones")
-
-
-class ZoneAccessRule(Base):
-    """区域访问规则表（已取消 nat_type 字段:项目不再分析 DNAT）"""
-    __tablename__ = "zone_access_rules"
-
-    id = Column(Integer, primary_key=True, index=True)
-    source_zone_id = Column(Integer, ForeignKey("firewall_zones.id"), nullable=False, comment="源区域ID")
-    dest_zone_id = Column(Integer, ForeignKey("firewall_zones.id"), nullable=False, comment="目的区域ID")
-    firewall_id = Column(Integer, ForeignKey("firewalls.id"), nullable=False, comment="防火墙ID")
-    allow_access = Column(Integer, default=1, comment="是否允许访问（1=允许，0=拒绝）")
-    description = Column(Text, comment="规则描述")
-    created_by = Column(String(100), comment="创建人")
-    created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment="更新时间")
-
-    # 关联关系
-    source_zone = relationship("FirewallZone", foreign_keys=[source_zone_id])
-    dest_zone = relationship("FirewallZone", foreign_keys=[dest_zone_id])
-    firewall = relationship("Firewall")
-
 
 
 class PushMode(str, enum.Enum):
     """推送模式 (重构.md §3 三 mode 隔离)"""
-    deduplicate = "deduplicate"  # 查重模式: 复用整条 + 复用对象 (4 维 HASH 命中 → REUSED 跳过)
-    force_push = "force_push"    # 全推模式: 对象可能复用 + 整条必新建
-    reuse_objects = "reuse_objects"  # 对象复用模式: 复用对象 + 整条必新建 (跟 force_push 区别在语义, 未来 client 差异化)
+    force_push = "force_push"       # 全新强制推送: 对象与策略全错开新建
+    reuse_objects = "reuse_objects"  # 对象复用模式: 复用相同 IP/端口组, 策略行新建
+    deduplicate = "deduplicate"     # 策略全量查重: 复用对象 + 整条策略一致则完全复用
 
 
 class PushSnapshotStatus(str, enum.Enum):
@@ -241,83 +88,7 @@ class PushSnapshotStatus(str, enum.Enum):
     running = "running"
     success = "success"
     failed = "failed"
-    partial = "partial"  # 部分成功
-
-
-class PushedPolicySnapshot(Base):
-    """已推送策略批次快照（可追溯 + 查重用）"""
-    __tablename__ = "pushed_policy_snapshots"
-
-    id = Column(Integer, primary_key=True, index=True)
-    order_id = Column(Integer, ForeignKey("orders.id"), nullable=False, index=True, comment="工单ID")
-    firewall_id = Column(Integer, ForeignKey("firewalls.id"), nullable=False, index=True, comment="防火墙ID")
-    batch_id = Column(String(50), nullable=False, index=True, comment="推送批次UUID")
-
-    push_mode = Column(Enum(PushMode), nullable=False, comment="推送模式")
-    status = Column(Enum(PushSnapshotStatus), default=PushSnapshotStatus.running, comment="状态")
-
-    # 统计
-    total_policies = Column(Integer, default=0, comment="工单总策略数")
-    new_policies = Column(Integer, default=0, comment="新建数")
-    reused_policies = Column(Integer, default=0, comment="复用整条数（仅deduplicate模式）")
-    appended_policies = Column(Integer, default=0, comment="追加数（仅deduplicate模式）")
-    failed_policies = Column(Integer, default=0, comment="失败数")
-
-    # 设备侧拉取的快照（全量存，可追溯）
-    fetched_addresses_json = Column(Text, comment="拉取的地址对象JSON")
-    fetched_policies_json = Column(Text, comment="拉取的策略JSON")
-    fetched_services_json = Column(Text, comment="拉取的端口对象JSON")
-
-    # 错误
-    error_log = Column(Text, comment="错误日志")
-
-    # 时间
-    started_at = Column(DateTime, default=datetime.utcnow, comment="开始时间")
-    finished_at = Column(DateTime, comment="结束时间")
-    created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
-
-    # 关联
-    items = relationship("PushedPolicyItem", back_populates="snapshot", cascade="all, delete-orphan")
-    order = relationship("Order")
-    firewall = relationship("Firewall")
-
-
-class PushedPolicyItem(Base):
-    """每条策略的推送明细（用于精确查重 + 回滚/审计）"""
-    __tablename__ = "pushed_policy_items"
-
-    id = Column(Integer, primary_key=True, index=True)
-    snapshot_id = Column(Integer, ForeignKey("pushed_policy_snapshots.id"), nullable=False, index=True, comment="所属快照ID")
-    order_id = Column(Integer, ForeignKey("orders.id"), nullable=False, comment="工单ID")
-    firewall_id = Column(Integer, ForeignKey("firewalls.id"), nullable=False, index=True, comment="防火墙ID")
-    policy_id = Column(Integer, comment="工单中的Policy表ID")
-
-    # 4 维度匹配键（用于查重）
-    match_key = Column(String(64), index=True, comment="4维度hash（SHA1前30位）")
-    src_addr_key = Column(String(2000), comment="源IP（排序去重）")
-    dst_addr_key = Column(String(2000), comment="目的IP（排序去重）")
-    service_key = Column(String(500), comment="端口（排序去重）")
-    schedule_key = Column(String(100), comment="有效期（标准化）")
-
-    # 设备上实际对象名
-    device_src_obj = Column(String(200), comment="设备上源地址对象名")
-    device_dst_obj = Column(String(200), comment="设备上目的地址对象名")
-    device_service_obj = Column(String(200), comment="设备上端口对象名")
-    device_schedule_obj = Column(String(200), comment="设备上时间对象名")
-
-    # 设备上的策略标识
-    device_policy_id = Column(String(100), comment="设备上策略ID/H3C rule name等")
-    device_policy_name = Column(String(200), comment="设备上策略名")
-
-    # 动作
-    action = Column(String(20), comment="created/reused/appended/failed")
-    raw_commands = Column(Text, comment="实际推送的命令（用于回滚/审计）")
-    error_msg = Column(Text, comment="本条错误信息")
-
-    created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
-
-    # 关联
-    snapshot = relationship("PushedPolicySnapshot", back_populates="items")
+    partial = "partial"
 
 
 class PushLogLevel(str, enum.Enum):
@@ -328,28 +99,288 @@ class PushLogLevel(str, enum.Enum):
     error = "error"
 
 
-class PushLog(Base):
-    """推送实时日志（流水线每一步 emit 一行）
+# ==========================================
+# 1. 资产与网络矩阵模块
+# ==========================================
 
-    用途：前端轮询拿，~1.5s 延迟即可视；持久化到 DB 便于故障排查。
+class Firewall(Base):
+    """防火墙元数据表 (重构.md §1 精简后)
+
+    已删除字段 (历史累计, 本次清理):
+      - region → belong_region (重命名, 语义不变: 防火墙所在大区)
+      - covered_region (NAT 透传 key 已迁到 ZoneAccessConfig)
+      - local_zone_name / external_zone_name (zone 寻路已迁到 ZoneAccessConfig.boundary_*)
+      - internal_protected_ips / external_protected_ips (spec 不要)
+      - supported_policy_types (已废弃)
+      - outbound_snat_pool / inbound_snat_pool (NAT 池已迁到 ZoneAccessConfig.snat_pool)
+      - allow_same_firewall_push (chain_planner 已绕开)
+      - push_contact / push_remark / remark (UI 无引用)
+    """
+    __tablename__ = "firewalls"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(200), nullable=False, comment="防火墙名称")
+    alias = Column(String(100), comment="别名")
+    type = Column(Enum(FirewallType), nullable=False, comment="防火墙物理厂商类型")
+    management_ip = Column(String(50), nullable=False, comment="管理IP")
+
+    belong_region = Column(String(100), nullable=True, comment="所属大区(组织归属)")
+    is_zone_boundary = Column(Integer, default=0, comment="是否属于跨区域边界防火墙(0:否, 1:是)")
+
+    connection_type = Column(Enum(ConnectionType), nullable=False, default=ConnectionType.ssh)
+    connection_config = Column(JSON, comment="连接凭据详情")
+
+    auto_push = Column(Integer, default=1, comment="是否激活自动推送(0:否, 1:是)")
+    status = Column(String(20), default="enabled", comment="运维状态: enabled/disabled")
+    is_active = Column(Integer, default=1, comment="软删除标识")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    zones = relationship("FirewallZone", back_populates="firewall", cascade="all, delete-orphan")
+    zone_access_configs = relationship("ZoneAccessConfig", back_populates="firewall")
+
+
+class FirewallZone(Base):
+    """设备安全域与资产网段表
+
+    已删除字段:
+      - description (spec 不要)
+    已新增字段:
+      - connect_region (spec 要求, 表达当前安全域连接的大区)
+    """
+    __tablename__ = "firewall_zones"
+
+    id = Column(Integer, primary_key=True, index=True)
+    firewall_id = Column(Integer, ForeignKey("firewalls.id"), nullable=False)
+    zone_name = Column(String(100), nullable=False, comment="防火墙本地接口域名称")
+    protected_ips = Column(Text, comment="该安全域技术保护的网段资产, 每行一个标准 CIDR")
+    connect_region = Column(String(100), nullable=False, comment="核心映射标签: 当前安全域技术上代表/连接着的全局宏观大区域")
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    firewall = relationship("Firewall", back_populates="zones")
+
+
+class ZoneAccessConfig(Base):
+    """全局区域访问与 NAT 路径矩阵
+
+    已重命名字段:
+      - source_zone → source_region (跟 belong_region 一致用 "region" 后缀)
+      - dest_zone → dest_region
+    已删除字段:
+      - created_by (spec 不要)
+    已新增字段 (spec 要求的 4 个边界 NAT 寻路关键字段):
+      - boundary_source_zone (NN): 边界墙面向源大区的本地 Zone 名称
+      - boundary_dest_zone (NN): 边界墙面向目的大区的本地 Zone 名称
+      - need_nat: 此路径是否强制 SNAT
+      - snat_pool: 路径专属 SNAT 转换地址池
+    """
+    __tablename__ = "zone_access_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    firewall_id = Column(Integer, ForeignKey("firewalls.id"), nullable=False, comment="扼守此大区通道的边界防火墙ID")
+
+    # 宏观多墙寻路标签
+    source_region = Column(String(100), nullable=False, comment="源宏观大区名称")
+    dest_region = Column(String(100), nullable=False, comment="目的宏观大区名称")
+
+    # 边界墙直接落地 Zone (彻底根除 trust/untrust 同名造成的语义冲突)
+    boundary_source_zone = Column(String(100), nullable=False, comment="当前边界墙面向源大区的本地 Zone 名称")
+    boundary_dest_zone = Column(String(100), nullable=False, comment="当前边界墙面向目的大区的本地 Zone 名称")
+
+    # NAT 控制属性
+    need_nat = Column(Integer, default=0, comment="此跨区路径是否强制做源地址转换 SNAT (0:否, 1:是)")
+    snat_pool = Column(String(500), nullable=True, comment="当前路径专属 SNAT 转换地址池 (如: 192.168.1.1-1.8)")
+
+    description = Column(Text, comment="路径规划备注")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    firewall = relationship("Firewall", back_populates="zone_access_configs")
+
+
+# ==========================================
+# 2. 工单与动态策略下发模块
+# ==========================================
+
+class Order(Base):
+    """工单主表
+
+    已删除:
+      - logs 关系 (OperationLog 表整体删除, spec 不要)
+    """
+    __tablename__ = "orders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    order_no = Column(String(50), unique=True, index=True, nullable=False, comment="唯一工单编号")
+    title = Column(String(200), nullable=False)
+    description = Column(Text)
+    excel_file_path = Column(String(500))
+    status = Column(Enum(OrderStatus), default=OrderStatus.pending)
+    created_by = Column(String(100))
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    policies = relationship("Policy", back_populates="order", cascade="all, delete-orphan")
+
+
+class Policy(Base):
+    """孪生策略明细表 (存储经过路径解耦与链式 IP 重写后的实际放行形态)
+
+    已删除字段 (本次清理):
+      - action (从未使用, spec 不要)
+      - is_merged (PolicyMerger 已删, spec 不要)
+      - merged_policy_id (同上)
+      - updated_at (spec 只有 created_at)
+    已规范字段:
+      - firewall_id 改为 nullable=False (spec 强制)
+      - source_ip / dest_ip / service 改为 nullable=False (spec 强制)
+      - device_source_zone / device_dest_zone 改为 nullable=False (spec 强制)
+      - push_status 默认值 "pending" (spec 要求)
+      - source_snat_ip typo 修正: "=Column(" → " = Column("
+    """
+    __tablename__ = "policies"
+
+    id = Column(Integer, primary_key=True, index=True)
+    order_id = Column(Integer, ForeignKey("orders.id"), nullable=False)
+    firewall_id = Column(Integer, ForeignKey("firewalls.id"), nullable=False, comment="当前策略行落地执行的物理防火墙")
+
+    # 动态链式改写后的四元组参数
+    source_ip = Column(String(500), nullable=False, comment="该墙放行的源IP (可能已被边界墙重写为 SNAT 池)")
+    dest_ip = Column(String(500), nullable=False, comment="目的IP")
+    service = Column(String(500), nullable=False, comment="服务端口组")
+    usage_time = Column(String(255), nullable=True, comment="标准化时间策略")
+
+    # 业务归属可追溯性
+    source_system_name = Column(String(100), comment="Excel 解析得到的源系统名")
+    dest_system_name = Column(String(100), comment="Excel 解析得到的目的系统名")
+
+    # 精确寻路落地数据
+    device_source_zone = Column(String(100), nullable=False, comment="系统计算出来的本地物理入向安全域")
+    device_dest_zone = Column(String(100), nullable=False, comment="系统计算出来的本地物理出向安全域")
+    source_snat_ip = Column(String(500), nullable=True, comment="若当前节点为边界墙且需要 SNAT, 记录下发的专属池, 否则留空")
+
+    # 执行状态
+    push_status = Column(String(50), default="pending", comment="单个物理策略放行状态 (pending/success/failed/reused)")
+    push_result = Column(Text)
+    pushed_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    order = relationship("Order", back_populates="policies")
+    firewall = relationship("Firewall")
+
+
+class PolicyVersion(Base):
+    """策略历史版本快照表
+
+    已删除字段:
+      - created_by 字段本来就没,无需动
+      - index=True 从 order_id 移除 (spec 不要求)
+    """
+    __tablename__ = "policy_versions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    order_id = Column(Integer, ForeignKey("orders.id"), nullable=False)
+    version_type = Column(String(30), nullable=False, comment="状态分类: original(纯原始 Excel 解析数据)/formatted")
+    data = Column(JSON, nullable=False, comment="全量 JSON 序列化载荷")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ==========================================
+# 3. 推送快照、全量查重与流式日志模块
+# ==========================================
+
+class PushedPolicySnapshot(Base):
+    """推送批次追溯主快照表
+
+    已删除字段:
+      - appended_policies (spec 只有 total/new/reused/failed 4 个计数)
+      - created_at (spec 只有 started_at/finished_at)
+    """
+    __tablename__ = "pushed_policy_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    order_id = Column(Integer, ForeignKey("orders.id"), nullable=False)
+    firewall_id = Column(Integer, ForeignKey("firewalls.id"), nullable=False)
+    batch_id = Column(String(50), nullable=False, index=True, comment="单次下发流水的批次 UUID")
+
+    push_mode = Column(Enum(PushMode), nullable=False, comment="前端指定的查重推送机制")
+    status = Column(Enum(PushSnapshotStatus), default=PushSnapshotStatus.running)
+
+    # 统计数据计数
+    total_policies = Column(Integer, default=0)
+    new_policies = Column(Integer, default=0)
+    reused_policies = Column(Integer, default=0)
+    failed_policies = Column(Integer, default=0)
+
+    # 发生态冷备份快照 (文本持久化, 排除后期因人为更改设备导致审计失效)
+    fetched_addresses_json = Column(Text, comment="下发前从物理防火墙上拉取的全量地址对象备份")
+    fetched_services_json = Column(Text, comment="下发前从物理防火墙上拉取的全量端口对象备份")
+    fetched_policies_json = Column(Text, comment="下发前从物理防火墙上拉取的全量安全策略行备份")
+
+    error_log = Column(Text)
+    started_at = Column(DateTime, default=datetime.utcnow)
+    finished_at = Column(DateTime, nullable=True)
+
+    items = relationship("PushedPolicyItem", back_populates="snapshot", cascade="all, delete-orphan")
+    logs = relationship(
+        "PushLog", back_populates="snapshot",
+        cascade="all, delete-orphan", order_by="PushLog.seq",
+    )
+    order = relationship("Order")
+    firewall = relationship("Firewall")
+
+
+class PushedPolicyItem(Base):
+    """每条策略的高精特征与回滚审计明细表
+
+    已删除字段:
+      - order_id (可通过 snapshot.order_id 推导)
+      - firewall_id (可通过 snapshot.firewall_id 推导)
+      - src_addr_key / dst_addr_key / service_key / schedule_key (spec 只要 match_key)
+      - device_policy_name (spec 只要 device_policy_id)
+      - created_at (spec 不要)
+    """
+    __tablename__ = "pushed_policy_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    snapshot_id = Column(Integer, ForeignKey("pushed_policy_snapshots.id"), nullable=False)
+    policy_id = Column(Integer, ForeignKey("policies.id"), nullable=False)
+
+    # 核心高精查重依据
+    match_key = Column(String(64), index=True, comment="标准化处理后的 4 维度参数 SHA1 前 30 位摘要")
+
+    # 设备真实创建/复用的命名对象线索
+    device_src_obj = Column(String(200), comment="设备侧真实源地址组/对象名称")
+    device_dst_obj = Column(String(200), comment="设备侧真实目的地址组/对象名称")
+    device_service_obj = Column(String(200), comment="设备侧真实端口组对象名称")
+    device_schedule_obj = Column(String(200), comment="设备侧真实时间对象名称")
+
+    # 设备侧落地物理标识
+    device_policy_id = Column(String(100), comment="物理设备返回的真实策略 ID 或 Rule 唯一索引名称")
+    action = Column(String(20), comment="具体动作: created / reused / failed")
+    raw_commands = Column(Text, comment="该设备真实执行并灌入的 CLI 命令块, 用于追溯与单线回滚")
+    error_msg = Column(Text)
+
+    snapshot = relationship("PushedPolicySnapshot", back_populates="items")
+    policy = relationship("Policy")
+
+
+class PushLog(Base):
+    """基于单步发射机制的即时流水线日志表 (供前端高频轮询渲染)
+
+    spec 字段无变化, 已对齐。
     """
     __tablename__ = "push_logs"
 
     id = Column(Integer, primary_key=True, index=True)
-    snapshot_id = Column(Integer, ForeignKey("pushed_policy_snapshots.id"), nullable=False, index=True, comment="所属快照ID")
-    seq = Column(Integer, nullable=False, comment="递增序号（同 snapshot 内从 1 开始）")
-    stage = Column(String(50), nullable=False, comment="阶段: start/load/connect/snapshot/fetch/parse/match/..."  )
-    level = Column(Enum(PushLogLevel), default=PushLogLevel.info, comment="日志级别")
-    message = Column(String(1000), nullable=False, comment="日志消息")
-    data_json = Column(Text, comment="附加数据 JSON")
-    created_at = Column(DateTime, default=datetime.utcnow, comment="创建时间")
+    snapshot_id = Column(Integer, ForeignKey("pushed_policy_snapshots.id"), nullable=False)
+    seq = Column(Integer, nullable=False, comment="单批次快照内从 1 开始的自增强保序序号")
+    stage = Column(String(50), nullable=False, comment="下发阶段: connect/fetch/match/push_obj/push_rule")
+    level = Column(Enum(PushLogLevel), default=PushLogLevel.info)
+    message = Column(String(1000), nullable=False, comment="日志正文说明")
+    data_json = Column(Text, comment="附带的细化排查底层回显 JSON 数据")
+    created_at = Column(DateTime, default=datetime.utcnow)
 
-    # 关联
     snapshot = relationship("PushedPolicySnapshot", back_populates="logs")
-
-
-# 给 snapshot 加 logs 关系
-PushedPolicySnapshot.logs = relationship(
-    "PushLog", back_populates="snapshot",
-    cascade="all, delete-orphan", order_by="PushLog.seq",
-)
