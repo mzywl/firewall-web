@@ -115,17 +115,35 @@ def update_firewall(
 
 @router.delete("/{firewall_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_firewall(firewall_id: int, db: Session = Depends(get_db)):
-    """删除防火墙（级联删除关联的策略）"""
-    from app.models import Policy
-    
+    """删除防火墙（级联删除所有关联表）"""
+    from app.models import (
+        Policy, FirewallZone, ZoneAccessConfig,
+        PushedPolicySnapshot, PushedPolicyItem, PushLog,
+    )
+
     db_firewall = db.query(Firewall).filter(Firewall.id == firewall_id).first()
     if not db_firewall:
         raise HTTPException(status_code=404, detail="防火墙不存在")
-    
-    # 先删除关联的策略
-    db.query(Policy).filter(Policy.firewall_id == firewall_id).delete()
-    
-    # 再删除防火墙
+
+    # FK 拓扑 (查 sqlalchemy inspector 列出来的 5 张关联表):
+    #   push_logs.snapshot_id      -> pushed_policy_snapshots.id
+    #   pushed_policy_items.snapshot_id -> pushed_policy_snapshots.id
+    #   pushed_policy_snapshots.firewall_id -> firewalls.id
+    #   policies.firewall_id       -> firewalls.id
+    #   firewall_zones.firewall_id -> firewalls.id
+    #   zone_access_configs.firewall_id -> firewalls.id
+    # 删除顺序: snapshot 的子表 (logs + items) → snapshot → policy/zone/cfg → firewall
+    snap_ids_subq = db.query(PushedPolicySnapshot.id).filter(
+        PushedPolicySnapshot.firewall_id == firewall_id
+    ).subquery()
+
+    db.query(PushLog).filter(PushLog.snapshot_id.in_(snap_ids_subq)).delete(synchronize_session=False)
+    db.query(PushedPolicyItem).filter(PushedPolicyItem.snapshot_id.in_(snap_ids_subq)).delete(synchronize_session=False)
+    db.query(PushedPolicySnapshot).filter(PushedPolicySnapshot.firewall_id == firewall_id).delete(synchronize_session=False)
+    db.query(Policy).filter(Policy.firewall_id == firewall_id).delete(synchronize_session=False)
+    db.query(FirewallZone).filter(FirewallZone.firewall_id == firewall_id).delete(synchronize_session=False)
+    db.query(ZoneAccessConfig).filter(ZoneAccessConfig.firewall_id == firewall_id).delete(synchronize_session=False)
+
     db.delete(db_firewall)
     db.commit()
     return None

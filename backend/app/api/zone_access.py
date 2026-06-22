@@ -38,8 +38,16 @@ class ZoneAccessConfigCreate(ZoneAccessConfigBase):
 
 @router.get("/firewalls")
 def get_firewalls(db: Session = Depends(get_db)):
-    """获取所有防火墙列表 (用于下拉选择)"""
-    firewalls = db.query(Firewall).filter(Firewall.is_active == 1).all()
+    """获取所有防火墙列表 (用于下拉选择)
+
+    2026-06-22: 只返回 is_zone_boundary=1 (边界墙) 的防火墙, 因为本模块是
+    跨区 NAT 配置, 非边界墙做不了, 让用户看不到它们更直观。
+    注: 全局防火墙列表请用 GET /api/firewalls (不受此过滤限制)
+    """
+    firewalls = db.query(Firewall).filter(
+        Firewall.is_active == 1,
+        Firewall.is_zone_boundary == 1,
+    ).all()
 
     return {
         "firewalls": [
@@ -49,6 +57,7 @@ def get_firewalls(db: Session = Depends(get_db)):
                 "alias": fw.alias,
                 "type": fw.type,
                 "belong_region": fw.belong_region,
+                "is_zone_boundary": fw.is_zone_boundary,
                 "zones": _extract_zones(fw),
             }
             for fw in firewalls
