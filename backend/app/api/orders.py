@@ -266,7 +266,7 @@ def update_policies(order_id: int, policies_data: List[dict], db: Session = Depe
             'source_ip': p.source_ip,
             'dest_ip': p.dest_ip,
             'service': p.service,
-            'action': p.action,
+            # 'action' 字段已删: spec §1 不要 action 列, Policy ORM 不再持有此属性
             'firewall_id': p.firewall_id,
             'device_source_zone': p.device_source_zone,
             'device_dest_zone': p.device_dest_zone,
