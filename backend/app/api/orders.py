@@ -79,7 +79,7 @@ async def upload_excel(
                 source_ip=str(row.get('source_ip', '')),
                 dest_ip=str(row.get('dest_ip', '')),
                 service=str(row.get('service', '')),
-                action=str(row.get('action', 'permit')),
+                # 注: Policy.action 字段已在 commit 229b08b spec 重写中删除 (spec §1 不再要 action 列)
                 usage_time=str(row.get('使用时间', '')) or str(row.get('usage_time', ''))
             )
 

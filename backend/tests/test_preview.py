@@ -30,7 +30,6 @@ def test_preview_api_returns_expected_structure(client, sample_firewall, db_sess
         dest_system_name='测试区',
         dest_ip='192.168.1.100',
         service='80',
-        action='permit',
     )
     p2 = Policy(
         order_id=order.id,
@@ -40,7 +39,6 @@ def test_preview_api_returns_expected_structure(client, sample_firewall, db_sess
         dest_system_name='生产区',
         dest_ip='10.0.2.100',
         service='443',
-        action='permit',
     )
     db_session.add_all([p1, p2])
     db_session.commit()

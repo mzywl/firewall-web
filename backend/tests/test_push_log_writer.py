@@ -110,7 +110,7 @@ def test_push_log_writer_survives_main_transaction_rollback(db_session):
     from app.models import Policy
     db_session.add(Policy(
         order_id=order_id, firewall_id=fw_id,
-        source_ip='1.1.1.1', dest_ip='2.2.2.2', service='80', action='permit',
+        source_ip='1.1.1.1', dest_ip='2.2.2.2', service='80',
     ))
     with pytest.raises(RuntimeError):
         try:

@@ -86,7 +86,7 @@ def _make_policy(db_session, order_id, **kwargs):
         order_id=order_id, firewall_id=None,
         source_system_name='生产区', source_ip='10.1.1.0/24',
         dest_system_name='测试区', dest_ip='192.168.1.10',
-        service='443', action='permit',
+        service='443',
     )
     defaults.update(kwargs)
     p = Policy(**defaults)

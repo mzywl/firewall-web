@@ -126,7 +126,6 @@ def _make_policy(db_session, order_id, **kwargs):
         dest_system_name='测试区',
         dest_ip='192.168.1.10',
         service='443',
-        action='permit',
     )
     defaults.update(kwargs)
     p = Policy(**defaults)
