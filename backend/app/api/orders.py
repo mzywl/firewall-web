@@ -143,7 +143,7 @@ def get_order_policies(order_id: int, version: str = None, db: Session = Depends
             raise HTTPException(status_code=404, detail=f"版本 {version} 不存在")
 
         return [{
-            'id': idx + 1, 'order_id': order_id, 'is_merged': False,
+            'id': idx + 1, 'order_id': order_id,
             'created_at': policy_version.created_at.isoformat() if policy_version.created_at else datetime.now().isoformat(),
             **policy_dict
         } for idx, policy_dict in enumerate(policy_version.data.get('policies', []))]
@@ -154,7 +154,6 @@ def get_order_policies(order_id: int, version: str = None, db: Session = Depends
         result.append({
             'id': policy.id,
             'order_id': policy.order_id,
-            'is_merged': policy.is_merged,
             'created_at': policy.created_at.isoformat() if policy.created_at else None,
             '源端系统-环境-用途': policy.source_system_name or '',
             '源IP': policy.source_ip or '',
