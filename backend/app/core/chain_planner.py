@@ -205,7 +205,15 @@ class ChainPlanner:
         usage_time = usage_time_by_id.get(policy.id, "")
 
         for sp in single_ip_policies:
-            # 情况 0: sp 自带 not_pushed_reason (splitter 内部判定: same_firewall 未启用等)
+            # 情况 0a (新增 2026-06-22): sp 自带 warning_reason (splitter 同墙同 zone 排除)
+            # 同墙同 zone L2 互通, fw 看不到流量 → 不进 firewall_groups, 只在 warnings 提示
+            if sp.get("warning_reason"):
+                ctx.warnings.append(
+                    f"策略 {policy.id} ({sp['source_ip']} → {sp['dest_ip']}): {sp['warning_reason']}"
+                )
+                continue
+
+            # 情况 0b: sp 自带 not_pushed_reason (splitter 内部判定: cross_internal 未启用等)
             if sp["not_pushed_reason"]:
                 ctx.not_pushed.append(
                     self._build_not_pushed_entry(policy, sp, sp["not_pushed_reason"], usage_time)
@@ -429,6 +437,8 @@ class ChainPlanner:
                 "service": sp["service"],
                 "action": sp.get("action", "permit"),  # sp.action 来自 splitter (非 Policy.action)
                 "direction": sp["direction"],
+                "src_zone_name": sp.get("src_zone_name"),  # 新增 (2026-06-22): merger key 维度
+                "dst_zone_name": sp.get("dst_zone_name"),  # 新增 (2026-06-22): merger key 维度
                 "nat_info": nat_info,
                 "使用时间": usage_time,
                 "original_data": {
