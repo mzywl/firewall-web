@@ -159,3 +159,91 @@ def sample_policy(db_session, sample_firewall):
     db_session.commit()
     db_session.refresh(policy)
     return policy
+
+
+# ============================================================
+# 设计文档 §9: 4 防火墙跨大区 + 跨物理墙 seed
+#   用途: 端到端压测 chain_planner 的双命中过滤 + 链式改写 + SNAT 透传
+# ============================================================
+@pytest.fixture
+def design_doc_seed(db_session):
+    """设计文档 §9 完整测试 seed — 4 台防火墙 + 9 个 zone + 1 个跨大区 cfg
+
+    拓扑:
+        生产区                     中央边界墙 fw3         测试区
+        fw1 (10.1 + 10.2)         192.168.1.1-1.8 (SNAT)  fw4 (172.16)
+        fw2 (10.2 + 10.1)         ←── 需 NAT ──→
+
+    覆盖场景:
+        1) 跨大区 (生产→测试): fw1 + fw3 (boundary SNAT) + fw4 (dst 改写)
+        2) 同大区跨墙东西向: fw1 + fw2 (无 NAT)
+    """
+    # --- 防火墙 ---
+    fw1 = Firewall(
+        name='生产区-物理A墙', type=FirewallType.huawei, management_ip='10.254.1.1',
+        belong_region='生产区', connection_type=ConnectionType.ssh,
+        is_zone_boundary=0, auto_push=0,
+    )
+    fw2 = Firewall(
+        name='生产区-物理B墙', type=FirewallType.h3c, management_ip='10.254.1.2',
+        belong_region='生产区', connection_type=ConnectionType.ssh,
+        is_zone_boundary=0, auto_push=0,
+    )
+    fw3 = Firewall(
+        name='中央隔离边界大墙', type=FirewallType.fortigate, management_ip='10.254.99.99',
+        belong_region='中央隔离区', connection_type=ConnectionType.ssh,
+        is_zone_boundary=1, auto_push=0,
+    )
+    fw4 = Firewall(
+        name='测试区-物理本地墙', type=FirewallType.hillstone, management_ip='10.254.2.1',
+        belong_region='测试区', connection_type=ConnectionType.ssh,
+        is_zone_boundary=0, auto_push=0,
+    )
+    db_session.add_all([fw1, fw2, fw3, fw4])
+    db_session.commit()
+    for fw in [fw1, fw2, fw3, fw4]:
+        db_session.refresh(fw)
+
+    # --- FirewallZone (设计文档 §9 §2) ---
+    # fw1 (生产A): Trust internal + Untrust external (生产区 + 测试区, 重名 2 行)
+    db_session.add_all([
+        FirewallZone(firewall_id=fw1.id, zone_name='Trust', zone_role='internal',
+                     connect_region='生产区', protected_ips='10.1.0.0/16'),
+        FirewallZone(firewall_id=fw1.id, zone_name='Untrust', zone_role='external',
+                     connect_region='生产区', protected_ips='10.2.0.0/16'),
+        FirewallZone(firewall_id=fw1.id, zone_name='Untrust', zone_role='external',
+                     connect_region='测试区', protected_ips='172.16.0.0/16'),
+        # fw2 (生产B): Trust + Untrust (同大区, 跨墙东西向)
+        FirewallZone(firewall_id=fw2.id, zone_name='Trust', zone_role='internal',
+                     connect_region='生产区', protected_ips='10.2.0.0/16'),
+        FirewallZone(firewall_id=fw2.id, zone_name='Untrust', zone_role='external',
+                     connect_region='生产区', protected_ips='10.1.0.0/16'),
+        # fw3 (中央边界): Port_To_Prod + Port_To_Test
+        FirewallZone(firewall_id=fw3.id, zone_name='Port_To_Prod', zone_role='external',
+                     connect_region='生产区', protected_ips='10.1.0.0/16\n10.2.0.0/16'),
+        FirewallZone(firewall_id=fw3.id, zone_name='Port_To_Test', zone_role='external',
+                     connect_region='测试区', protected_ips='172.16.0.0/16\n192.168.1.0/24'),
+        # fw4 (测试本地): Trust internal + Untrust external (含 SNAT 池段)
+        FirewallZone(firewall_id=fw4.id, zone_name='Trust', zone_role='internal',
+                     connect_region='测试区', protected_ips='172.16.0.0/16'),
+        FirewallZone(firewall_id=fw4.id, zone_name='Untrust', zone_role='external',
+                     connect_region='生产区', protected_ips='10.1.0.0/16\n192.168.1.0/24'),
+    ])
+    db_session.commit()
+
+    # --- ZoneAccessConfig (设计文档 §9 §3) ---
+    db_session.add(ZoneAccessConfig(
+        firewall_id=fw3.id,
+        source_region='生产区', dest_region='测试区',
+        boundary_source_zone='Port_To_Prod', boundary_dest_zone='Port_To_Test',
+        need_nat=1, snat_pool='192.168.1.1-192.168.1.8',
+        description='设计文档 §9: 中央边界墙 NAT 路径',
+    ))
+    db_session.commit()
+
+    return {
+        'fw1': fw1, 'fw2': fw2, 'fw3': fw3, 'fw4': fw4,
+        # 帮助测试断言的别名
+        'cross_fws': [fw1, fw3, fw4],  # 跨大区触达 3 台
+        'east_west_fws': [fw1, fw2],   # 同大区东西向触达 2 台
+    }

@@ -1,15 +1,19 @@
 """
-防火墙区域管理 API — 对齐 重构.md §1 新设计
+防火墙区域管理 API — 对齐 重构.md §1 + 设计文档 §1
 
 新设计 (2026-06-22):
   - 删除 ZoneAccessRule 表 (spec 不要)
   - FirewallZone 新增 connect_region 字段 (替代 description)
   - FirewallZone.description 字段已删
+
+进一步对齐设计文档 (2026-06-22):
+  - FirewallZone 新增 zone_role 字段 (internal/external 显式角色)
+  - 替代旧隐式判定 connect_region == fw.belong_region
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 from app.database import get_db
 from app.models import Firewall, FirewallZone
@@ -17,12 +21,18 @@ from app.models import Firewall, FirewallZone
 router = APIRouter(prefix="/api/firewall-zones", tags=["firewall-zones"])
 
 
+# 设计文档 §1: 显式 enum
+ZONE_ROLE_INTERNAL = "internal"  # 内部防护域 (Trust)
+ZONE_ROLE_EXTERNAL = "external"  # 外部防护域 (Untrust, 通往其他墙/大区)
+
+
 class FirewallZoneCreate(BaseModel):
-    """创建防火墙区域 (新设计: description → connect_region)"""
+    """创建防火墙区域 (设计文档 §1: zone_role 显式标记)"""
     firewall_id: int
     zone_name: str
     protected_ips: Optional[str] = None
     connect_region: str  # spec 要求 NOT NULL
+    zone_role: str = Field(default=ZONE_ROLE_INTERNAL, description="internal=内部防护, external=外部防护")
 
 
 class FirewallZoneUpdate(BaseModel):
@@ -30,6 +40,7 @@ class FirewallZoneUpdate(BaseModel):
     zone_name: Optional[str] = None
     protected_ips: Optional[str] = None
     connect_region: Optional[str] = None
+    zone_role: Optional[str] = None
 
 
 @router.get("/firewall/{firewall_id}")
@@ -54,6 +65,7 @@ def get_firewall_zones(firewall_id: int, db: Session = Depends(get_db)):
                 "zone_name": zone.zone_name,
                 "protected_ips": zone.protected_ips,
                 "connect_region": zone.connect_region,
+                "zone_role": zone.zone_role,  # 设计文档 §1: 显式角色
                 "created_at": zone.created_at.isoformat(),
                 "updated_at": zone.updated_at.isoformat(),
             }
@@ -69,6 +81,9 @@ def create_firewall_zone(zone: FirewallZoneCreate, db: Session = Depends(get_db)
     if not firewall:
         raise HTTPException(status_code=404, detail="防火墙不存在")
 
+    if zone.zone_role not in (ZONE_ROLE_INTERNAL, ZONE_ROLE_EXTERNAL):
+        raise HTTPException(status_code=400, detail=f"zone_role 必须是 {ZONE_ROLE_INTERNAL} 或 {ZONE_ROLE_EXTERNAL}")
+
     existing = db.query(FirewallZone).filter(
         FirewallZone.firewall_id == zone.firewall_id,
         FirewallZone.zone_name == zone.zone_name,
@@ -82,6 +97,7 @@ def create_firewall_zone(zone: FirewallZoneCreate, db: Session = Depends(get_db)
         zone_name=zone.zone_name,
         protected_ips=zone.protected_ips,
         connect_region=zone.connect_region,
+        zone_role=zone.zone_role,
     )
 
     db.add(new_zone)
@@ -94,6 +110,7 @@ def create_firewall_zone(zone: FirewallZoneCreate, db: Session = Depends(get_db)
         "zone_name": new_zone.zone_name,
         "protected_ips": new_zone.protected_ips,
         "connect_region": new_zone.connect_region,
+        "zone_role": new_zone.zone_role,
         "created_at": new_zone.created_at.isoformat(),
     }
 
@@ -106,6 +123,9 @@ def update_firewall_zone(zone_id: int, zone: FirewallZoneUpdate, db: Session = D
         raise HTTPException(status_code=404, detail="区域不存在")
 
     update_data = zone.dict(exclude_unset=True)
+    if "zone_role" in update_data and update_data["zone_role"] not in (ZONE_ROLE_INTERNAL, ZONE_ROLE_EXTERNAL):
+        raise HTTPException(status_code=400, detail=f"zone_role 必须是 {ZONE_ROLE_INTERNAL} 或 {ZONE_ROLE_EXTERNAL}")
+
     for field, value in update_data.items():
         setattr(db_zone, field, value)
 
@@ -119,6 +139,7 @@ def update_firewall_zone(zone_id: int, zone: FirewallZoneUpdate, db: Session = D
         "zone_name": db_zone.zone_name,
         "protected_ips": db_zone.protected_ips,
         "connect_region": db_zone.connect_region,
+        "zone_role": db_zone.zone_role,
         "updated_at": db_zone.updated_at.isoformat(),
     }
 

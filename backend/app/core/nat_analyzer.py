@@ -190,6 +190,13 @@ class NATAnalyzer:
         if not zone or not zone.connect_region:
             return "unknown"
 
+        # 优先级 1: 显式 zone_role (设计文档 §1 强制)
+        if zone.zone_role == "internal":
+            return "internal"
+        if zone.zone_role == "external":
+            return "external"
+
+        # 优先级 2: 降级到隐式判定 (兼容历史)
         # 在 cfg 里找: 这个 connect_region 是 source_region 还是 dest_region
         cfgs = list(fw.zone_access_configs or [])
         if not cfgs:

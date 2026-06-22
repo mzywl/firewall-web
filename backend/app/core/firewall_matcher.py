@@ -141,10 +141,21 @@ class FirewallMatcher:
     ) -> bool:
         """判断 zone 是否属于防火墙的 internal 侧
 
-        判定逻辑: zone.connect_region == firewall.belong_region → internal
-                  zone.connect_region != firewall.belong_region → external
+        判定优先级 (设计文档 §1):
+          1. 显式: zone.zone_role == 'internal' → True; == 'external' → False
+          2. 降级 (历史数据 / zone_role 字段未填时): zone.connect_region == firewall.belong_region → internal
         """
-        if not zone or not zone.connect_region:
+        if not zone:
+            return False
+
+        # 优先级 1: 显式 zone_role (设计文档 §1 强制)
+        if zone.zone_role == "internal":
+            return True
+        if zone.zone_role == "external":
+            return False
+
+        # 优先级 2: 降级到隐式判定 (兼容历史)
+        if not zone.connect_region:
             return False
         if not fw.belong_region:
             return False

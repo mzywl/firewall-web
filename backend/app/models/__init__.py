@@ -147,6 +147,8 @@ class FirewallZone(Base):
       - description (spec 不要)
     已新增字段:
       - connect_region (spec 要求, 表达当前安全域连接的大区)
+      - zone_role (设计文档 §1 要求, 显式标记 internal/external 防护域,
+                   替代旧隐式判定 connect_region == fw.belong_region)
     """
     __tablename__ = "firewall_zones"
 
@@ -155,6 +157,10 @@ class FirewallZone(Base):
     zone_name = Column(String(100), nullable=False, comment="防火墙本地接口域名称")
     protected_ips = Column(Text, comment="该安全域技术保护的网段资产, 每行一个标准 CIDR")
     connect_region = Column(String(100), nullable=False, comment="核心映射标签: 当前安全域技术上代表/连接着的全局宏观大区域")
+    zone_role = Column(
+        String(20), nullable=False, server_default='internal',
+        comment="设计文档 §1: 显式域角色 (internal=内部防护, external=外部防护)"
+    )
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

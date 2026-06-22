@@ -36,14 +36,23 @@ interface FirewallZone {
   zone_name: string;
   protected_ips: string;
   connect_region: string;
+  zone_role: 'internal' | 'external';  // 设计文档 §1: 显式 internal/external 角色
   created_at: string;
   updated_at: string;
 }
 
-const EMPTY_ZONE = {
+type ZoneRole = 'internal' | 'external';
+
+const EMPTY_ZONE: {
+  zone_name: string;
+  protected_ips: string;
+  connect_region: string;
+  zone_role: ZoneRole;
+} = {
   zone_name: '',
   protected_ips: '',
   connect_region: '',
+  zone_role: 'internal',  // 设计文档 §1: 默认 internal (Trust)
 };
 
 export default function FirewallZones() {
@@ -98,6 +107,7 @@ export default function FirewallZones() {
       zone_name: zone.zone_name,
       protected_ips: zone.protected_ips || '',
       connect_region: zone.connect_region,
+      zone_role: zone.zone_role,  // 设计文档 §1: 预填显式角色
     });
     setShowForm(true);
   };
@@ -134,8 +144,10 @@ export default function FirewallZones() {
     });
   };
 
-  const isInternal = (zone: FirewallZone) =>
-    firewall?.belong_region && zone.connect_region === firewall.belong_region;
+  // 设计文档 §1: 显式 zone_role, 替代旧 connect_region 隐式判定
+  const roleBadge = (z: FirewallZone) => z.zone_role === 'internal'
+    ? <Badge>内部 (Trust)</Badge>
+    : <Badge variant="outline">外部 (Untrust)</Badge>;
 
   return (
     <div className="container mx-auto p-6 max-w-5xl">
@@ -194,11 +206,7 @@ export default function FirewallZones() {
                       <Badge>{zone.connect_region || '(未设)'}</Badge>
                     </td>
                     <td className="px-4 py-2">
-                      {isInternal(zone) ? (
-                        <Badge variant="default">内部 (与大区相同)</Badge>
-                      ) : (
-                        <Badge variant="outline">外部 (其他大区)</Badge>
-                      )}
+                      {roleBadge(zone)}
                     </td>
                     <td className="px-4 py-2 font-mono text-xs text-gray-600 max-w-md truncate">
                       {zone.protected_ips
@@ -232,7 +240,8 @@ export default function FirewallZones() {
         <h3 className="text-sm font-semibold mb-1">💡 配置说明</h3>
         <ul className="text-xs text-gray-700 space-y-1">
           <li>• 每个 zone 是防火墙上的一个物理接口 (Trust / Untrust / DMZ 等)</li>
-          <li>• <b>connect_region</b>: 该 zone 物理上连接的大区, 用于 NAT 方向判定 (与 firewall.belong_region 相同 = 内部, 否则 = 外部)</li>
+          <li>• <b>connect_region</b>: 该 zone 物理上连接的大区, 仅作为参考 (历史字段, 已不直接判定 internal/external)</li>
+          <li>• <b>zone_role</b> (设计文档 §1): 显式标记 internal/external, chain_planner 优先用这个判定</li>
           <li>• <b>protected_ips</b>: 该 zone 保护的 IP 网段 (每行一个 CIDR), 策略匹配用</li>
           <li>• 一个防火墙可以配多个 zone (e.g. Trust + DMZ + Untrust)</li>
           <li>• 跨大区访问的 SNAT 池在 <Link to={`/firewalls/${firewallId}/access`} className="text-blue-600 underline">「跨区配置」</Link> 页面单独配</li>
@@ -269,7 +278,25 @@ export default function FirewallZones() {
                     placeholder="如: 生产区 / 测试区 / 互联网"
                   />
                   <p className="text-xs text-gray-500 mt-1">
-                    该 zone 物理上连接的大区名 (与 firewall.belong_region 对比判定 internal/external)
+                    该 zone 物理上连接的大区名 (跟 firewall.belong_region 对比, 仅作为参考)
+                  </p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium mb-1">
+                    zone 角色 *
+                    <span className="text-xs text-gray-500 ml-2">(设计文档 §1: 显式标记 internal / external)</span>
+                  </label>
+                  <select
+                    required
+                    className="w-full px-3 py-2 border rounded-md"
+                    value={formData.zone_role}
+                    onChange={(e) => setFormData({ ...formData, zone_role: e.target.value as 'internal' | 'external' })}
+                  >
+                    <option value="internal">internal (内部防护域 / Trust — 保护自家资产)</option>
+                    <option value="external">external (外部防护域 / Untrust — 通往其他大区/墙)</option>
+                  </select>
+                  <p className="text-xs text-gray-500 mt-1">
+                    显式角色, chain_planner 优先使用 (替代旧 connect_region 隐式判定)
                   </p>
                 </div>
                 <div>
