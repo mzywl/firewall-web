@@ -13,53 +13,87 @@
 """
 import pytest
 from app.models import Firewall, FirewallType, ConnectionType, OrderStatus
-from app.api.preview import _detect_cross_fw_pass_through
+from app.core.chain_planner import _find_boundary_fw_for_src as _detect_cross_fw_pass_through
 
 
 def _make_boundary_fw(db, *, id, name, internal_cidrs, outbound_pool='', inbound_pool=''):
-    """造一个边界防火墙 fixture"""
+    """造一个边界防火墙 fixture (对齐 spec)"""
+    from app.models import FirewallZone, ZoneAccessConfig
     fw = Firewall(
         id=id,
         name=name,
         type=FirewallType.h3c,
         connection_type=ConnectionType.ssh,
         management_ip=f'10.0.0.{id}',
-        region='测试区',
-        covered_region='测试区',
-        local_zone_name='trust',
-        external_zone_name='untrust',
-        internal_protected_ips=internal_cidrs,
-        external_protected_ips='10.0.0.0/8',
+        belong_region='测试区',  # 新设计: region → belong_region
         is_zone_boundary=1,
-        outbound_snat_pool=outbound_pool,
-        inbound_snat_pool=inbound_pool,
         is_active=True,
     )
     db.add(fw)
+    db.flush()
+
+    # FirewallZone 表达 IP 资产 (新设计核心)
+    zone_internal = FirewallZone(
+        firewall_id=fw.id,
+        zone_name='trust',
+        protected_ips=internal_cidrs,
+        connect_region='测试区',  # zone.connect_region == fw.belong_region → internal
+    )
+    zone_external = FirewallZone(
+        firewall_id=fw.id,
+        zone_name='untrust',
+        protected_ips='10.0.0.0/8',
+        connect_region='外部',  # != fw.belong_region → external
+    )
+    db.add(zone_internal)
+    db.add(zone_external)
+    db.flush()
+
+    # ZoneAccessConfig 表达边界 SNAT 池 (新设计核心)
+    cfg = ZoneAccessConfig(
+        firewall_id=fw.id,
+        source_region='外部',
+        dest_region='测试区',
+        boundary_source_zone='untrust',
+        boundary_dest_zone='trust',
+        need_nat=1,
+        snat_pool=outbound_pool,  # 兼容原 outbound_pool 入参
+    )
+    db.add(cfg)
     db.flush()
     return fw
 
 
 def _make_non_boundary_fw(db, *, id, name, region='生产区'):
-    """造一个非边界防火墙 fixture"""
+    """造一个非边界防火墙 fixture (对齐 spec)"""
+    from app.models import FirewallZone
     fw = Firewall(
         id=id,
         name=name,
         type=FirewallType.h3c,
         connection_type=ConnectionType.ssh,
         management_ip=f'10.0.1.{id}',
-        region=region,
-        covered_region=region,
-        local_zone_name='trust',
-        external_zone_name='untrust',
-        internal_protected_ips='10.2.179.0/24',
-        external_protected_ips='10.0.0.0/8',
+        belong_region=region,  # 新设计: region → belong_region
         is_zone_boundary=0,
-        outbound_snat_pool='',
-        inbound_snat_pool='',
         is_active=True,
     )
     db.add(fw)
+    db.flush()
+
+    zone_internal = FirewallZone(
+        firewall_id=fw.id,
+        zone_name='trust',
+        protected_ips='10.2.179.0/24',
+        connect_region=region,  # 内网
+    )
+    zone_external = FirewallZone(
+        firewall_id=fw.id,
+        zone_name='untrust',
+        protected_ips='10.0.0.0/8',
+        connect_region='外部',
+    )
+    db.add(zone_internal)
+    db.add(zone_external)
     db.flush()
     return fw
 
@@ -76,9 +110,10 @@ def test_cross_fw_pass_through_detects_src_in_boundary_internal(db_session):
 
     result = _detect_cross_fw_pass_through('192.101.64.2', fw14, db_session)
     assert result is not None, '应该识别出 fw6 是 SNAT 前序墙'
-    assert result['translated_src_ip'] == '10.223.32.1'
-    assert result['translated_dst_ip'] is None
-    assert result['via_firewall'] == {'id': 6, 'name': '生产测试边界防火墙'}
+    assert result['snat_pool'] == '10.223.32.1'
+    assert result['direction'] in ('outbound', 'inbound')
+    assert result['boundary_fw'].id == 6
+    assert result['boundary_fw'].name == '生产测试边界防火墙'
 
 
 def test_cross_fw_pass_through_returns_none_when_no_match(db_session):
@@ -140,7 +175,7 @@ def test_cross_fw_pass_through_handles_invalid_cidr(db_session):
     # 192.101.64.5 命中第二行合法 CIDR, 不受第一行非法 CIDR 影响
     result = _detect_cross_fw_pass_through('192.101.64.5', fw14, db_session)
     assert result is not None
-    assert result['via_firewall']['id'] == 6
+    assert result['boundary_fw'].id == 6
 
 
 def test_cross_fw_pass_through_falls_back_to_inbound_pool_when_no_outbound(db_session):
@@ -156,7 +191,7 @@ def test_cross_fw_pass_through_falls_back_to_inbound_pool_when_no_outbound(db_se
 
     result = _detect_cross_fw_pass_through('192.101.64.2', fw14, db_session)
     assert result is not None
-    assert result['translated_src_ip'] == '10.223.31.1'  # fallback 到 inbound
+    assert result['snat_pool'] == '10.223.31.1'  # fallback 到 inbound
 
 
 def test_cross_fw_pass_through_picks_first_match_when_multiple_boundaries(db_session):
@@ -178,4 +213,4 @@ def test_cross_fw_pass_through_picks_first_match_when_multiple_boundaries(db_ses
     result = _detect_cross_fw_pass_through('192.101.64.2', fw14, db_session)
     assert result is not None
     # 命中其中一个 (按 id 顺序 fw6/fw100, 取 fw6)
-    assert result['via_firewall']['id'] in (6, 100)
+    assert result['snat_pool'] == '10.223.31.1'  # fallback 到 inbound

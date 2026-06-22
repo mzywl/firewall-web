@@ -68,21 +68,16 @@ def create_firewall(firewall: FirewallCreate, db: Session = Depends(get_db)):
         alias=firewall.alias,
         type=firewall.type,
         management_ip=firewall.management_ip,
-        region=firewall.region,
-        local_zone_name=firewall.local_zone_name,
-        external_zone_name=firewall.external_zone_name,
+        # 新设计 (2026-06-22): region → belong_region,
+        # covered_region/local_zone_name/external_zone_name/internal_protected_ips/
+        # external_protected_ips/supported_policy_types/outbound_snat_pool/
+        # inbound_snat_pool/push_contact/push_remark/remark 全部删除
+        belong_region=firewall.belong_region,
+        is_zone_boundary=firewall.is_zone_boundary,
         connection_type=firewall.connection_type,
         connection_config=connection_config,
-        internal_protected_ips=firewall.internal_protected_ips,
-        external_protected_ips=firewall.external_protected_ips,
-        supported_policy_types=firewall.supported_policy_types,
-        outbound_snat_pool=firewall.outbound_snat_pool,
-        inbound_snat_pool=firewall.inbound_snat_pool,
         auto_push=firewall.auto_push,
-        push_contact=firewall.push_contact,
-        push_remark=firewall.push_remark,
         status=firewall.status,
-        remark=firewall.remark
     )
     
     db.add(db_firewall)
