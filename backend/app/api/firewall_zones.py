@@ -84,13 +84,21 @@ def create_firewall_zone(zone: FirewallZoneCreate, db: Session = Depends(get_db)
     if zone.zone_role not in (ZONE_ROLE_INTERNAL, ZONE_ROLE_EXTERNAL):
         raise HTTPException(status_code=400, detail=f"zone_role 必须是 {ZONE_ROLE_INTERNAL} 或 {ZONE_ROLE_EXTERNAL}")
 
+    # 设计文档 §9 允许多个同名 zone (e.g. fw1 同时有 2 个 "Untrust" zone, 分别连不同大区)
+    # 唯一性按 (firewall_id, zone_name, connect_region) 复合键判
+    # 也就是说: 同名 + 同 connect_region → 视为真重复 (用户误操作)
+    # 同名 + 不同 connect_region → 合法 (设计文档 §9 多接口场景)
     existing = db.query(FirewallZone).filter(
         FirewallZone.firewall_id == zone.firewall_id,
         FirewallZone.zone_name == zone.zone_name,
+        FirewallZone.connect_region == zone.connect_region,
     ).first()
 
     if existing:
-        raise HTTPException(status_code=400, detail="该防火墙已存在同名区域")
+        raise HTTPException(
+            status_code=400,
+            detail=f"该防火墙已存在同名 + 同 connect_region 的区域 (zone_name='{zone.zone_name}', connect_region='{zone.connect_region}')",
+        )
 
     new_zone = FirewallZone(
         firewall_id=zone.firewall_id,
