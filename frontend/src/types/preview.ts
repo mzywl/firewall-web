@@ -27,11 +27,15 @@ export interface NATInfo {
  *
  * 坑点: PASS_THROUGH 行的 source_zone / dest_zone 用**当前 firewall** 视角的 zone_name
  *       (不是 region_nat_state 里的边界墙 zone_name)
+ *
+ * 2026-06-22 C3: 加 original_source_ip 字段 (C2 后端 chain_planner 透传),
+ *   PASS_THROUGH 行前端展示 "原 src=xxx" 让用户看流量从哪个原始 IP 来
  */
 export interface NATPolicy {
   type: 'SNAT' | 'PASS_THROUGH';
   source_zone: string;
   source_ip: string;
+  original_source_ip?: string;
   dest_zone: string;
   dest_ip: string;
   service: string;
@@ -65,6 +69,11 @@ export interface PreviewPolicy {
 
 /**
  * 防火墙 (preview 路由只返回部分字段, 注意跟 types/index.ts 里的不一样)
+ *
+ * 2026-06-22 C3 对齐:
+ *   - region → belong_region (spec §1 重命名)
+ *   - 删 push_contact (spec §1 删除字段)
+ *   - 加 is_zone_boundary (前端用 "将在此墙推送" 标识)
  */
 export interface PreviewFirewall {
   id: number;
@@ -72,10 +81,9 @@ export interface PreviewFirewall {
   alias: string;
   type: string;
   management_ip: string;
-  region: string;
+  belong_region: string;
+  is_zone_boundary: number;
   auto_push: number;
-  push_contact: string;
-  // 注意: preview API 还没回传 is_zone_boundary, 详见 SKILL.md 坑点 (待补)
 }
 
 export interface FirewallGroup {

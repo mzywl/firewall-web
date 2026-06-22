@@ -86,6 +86,11 @@ export const FirewallPolicyTable = ({ group }: Props) => {
                 const labelText = isPassThrough
                   ? `[经 ${natPolicy.via_firewall?.name || '前序墙'} SNAT 转换]`
                   : '[SNAT]'
+                // PASS_THROUGH 行的 source_ip 已是 SNAT 后的地址, 原始 IP 在 original_source_ip
+                // 仅当两者不同才显示 "原 src=..." 让用户看到流量从哪个 IP 透传过来
+                const showOriginalSrc = isPassThrough
+                  && natPolicy.original_source_ip
+                  && natPolicy.original_source_ip !== natPolicy.source_ip
                 return (
                   <tr key={`${policy.id}-nat-${idx}`} className={`border-t ${rowBg}`}>
                     <td className="px-3 py-2"></td>
@@ -95,6 +100,11 @@ export const FirewallPolicyTable = ({ group }: Props) => {
                       <span className={`ml-2 px-2 py-0.5 ${badgeBg} text-xs rounded`}>
                         {labelText}
                       </span>
+                      {showOriginalSrc && (
+                        <span className="ml-2 text-xs text-muted-foreground">
+                          原 src={natPolicy.original_source_ip}
+                        </span>
+                      )}
                     </td>
                     <td className={`px-3 py-2 ${textColor} truncate`}>{natPolicy.dest_zone}</td>
                     <td className={`px-3 py-2 ${textColor} whitespace-pre-line break-all`}>{natPolicy.dest_ip}</td>

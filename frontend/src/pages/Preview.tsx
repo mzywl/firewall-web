@@ -185,8 +185,7 @@ export const Preview = () => {
                 </CardTitle>
                 <CardDescription className="mt-1">
                   类型: {group.firewall.type} | 管理IP: {group.firewall.management_ip} | 
-                  区域: {group.firewall.region || '未设置'} | 
-                  责任人: {group.firewall.push_contact || '未设置'}
+                  区域: {group.firewall.belong_region || '未设置'}
                 </CardDescription>
               </div>
               <div className="flex items-center gap-2">

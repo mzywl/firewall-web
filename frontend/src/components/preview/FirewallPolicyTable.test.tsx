@@ -41,9 +41,9 @@ const makeGroup = (over: Partial<FirewallGroup> = {}): FirewallGroup => ({
     alias: '测试防火墙',
     type: 'fortinet',
     management_ip: '10.99.99.1',
-    region: '测试区',
+    belong_region: '测试区',
+    is_zone_boundary: 0,
     auto_push: 0,
-    push_contact: 'admin',
   },
   policies: [],
   ...over,
@@ -138,6 +138,48 @@ describe('FirewallPolicyTable', () => {
     expect(screen.getByText(/经 前置墙fw1 SNAT 转换/)).toBeInTheDocument()
     // 绿色行
     expect(container.querySelector('.bg-emerald-50')).toBeInTheDocument()
+  })
+
+  it('PASS_THROUGH shows "原 src=..." when original_source_ip differs from source_ip (C3)', () => {
+    // source_ip 是 SNAT 后的地址, original_source_ip 是流量真实原始 IP
+    const natPolicies: NATPolicy[] = [
+      {
+        type: 'PASS_THROUGH',
+        source_zone: '内网',
+        source_ip: '198.51.100.5',     // SNAT 后 (透传到下游墙的源)
+        original_source_ip: '10.1.1.7', // 流量真实原 IP
+        dest_zone: 'DMZ',
+        dest_ip: '10.2.2.2',
+        service: '443',
+        action: 'permit',
+        via_firewall: { id: 99, name: '前置墙fw1' },
+      },
+    ]
+    const policy = makePolicy({ nat_policies: natPolicies })
+    render(<FirewallPolicyTable group={makeGroup({ policies: [policy] })} />)
+    // 两个 IP 都要在文档里, 且 "原 src=..." 标签存在
+    expect(screen.getByText('198.51.100.5')).toBeInTheDocument()
+    expect(screen.getByText(/原 src=10\.1\.1\.7/)).toBeInTheDocument()
+  })
+
+  it('PASS_THROUGH 不显示 "原 src=..." 当 original_source_ip 跟 source_ip 相同', () => {
+    // 兼容历史数据 / 退化情况: original_source_ip 未透传时隐藏标签
+    const natPolicies: NATPolicy[] = [
+      {
+        type: 'PASS_THROUGH',
+        source_zone: '内网',
+        source_ip: '10.1.1.7',
+        original_source_ip: '10.1.1.7', // 跟 source_ip 一样, 不该显示
+        dest_zone: 'DMZ',
+        dest_ip: '10.2.2.2',
+        service: '443',
+        action: 'permit',
+        via_firewall: { id: 99, name: '前置墙fw1' },
+      },
+    ]
+    const policy = makePolicy({ nat_policies: natPolicies })
+    render(<FirewallPolicyTable group={makeGroup({ policies: [policy] })} />)
+    expect(screen.queryByText(/原 src=/)).not.toBeInTheDocument()
   })
 
   it('renders warnings row (yellow) when nat_info.warnings has entries', () => {
