@@ -1,9 +1,17 @@
 """
-链式寻路 + NAT 透传规划器 (chain_planner)
+链式寻路 + NAT 透传规划器 (chain_planner) — 对齐 重构.md §1 新设计
 
 封装 firewall_matcher + nat_analyzer + splitter_v2 的物理拓扑逻辑,提供
 generate_chain_execution_plan() 单一入口。设计对应 backend/重构.md §2
 "链式寻路算法与 NAT 动态重写"。
+
+新设计调整 (2026-06-22):
+  - Firewall 不再有 covered_region / local_zone_name / external_zone_name /
+    internal_protected_ips / external_protected_ips / outbound_snat_pool /
+    inbound_snat_pool 字段
+  - 这些字段全部迁到 ZoneAccessConfig (boundary_source_zone / boundary_dest_zone /
+    snat_pool) + FirewallZone (zone_name / protected_ips / connect_region)
+  - 本模块需要通过 firewall.zones 和 firewall.zone_access_configs 关联取数据
 
 核心铁律 (任何重构不能违反):
   1. 防火墙只认当前进到它接口里的数据包
@@ -27,7 +35,7 @@ import logging
 
 from sqlalchemy.orm import Session
 
-from app.models import Firewall, Policy, ZoneAccessConfig
+from app.models import Firewall, Policy, ZoneAccessConfig, FirewallZone
 from app.core.firewall_matcher import FirewallMatcher
 from app.core.nat_analyzer import NATAnalyzer
 from app.core.policy_splitter_v2 import PolicySplitterV2
@@ -58,6 +66,72 @@ class ChainContext:
         self.firewall_groups: Dict[int, Dict] = {}
         self.not_pushed: List[Dict] = []  # 跟 boundary 无关、无法推送的 sp
         self.warnings: List[str] = []
+
+
+# ============================================================
+# 新设计辅助: 从 Firewall + 关联表取 zone/NAT 信息
+# ============================================================
+def _get_firewall_zones_dict(firewall: Firewall) -> Dict[str, FirewallZone]:
+    """返回 firewall 所有 zone 的 {zone_name: FirewallZone} 索引"""
+    return {z.zone_name: z for z in (firewall.zones or [])}
+
+
+def _get_boundary_cfgs(firewall: Firewall) -> List[ZoneAccessConfig]:
+    """返回 firewall 所有 ZoneAccessConfig (boundary cfg) 列表"""
+    return list(firewall.zone_access_configs or [])
+
+
+def _find_matching_zone_by_ip(
+    firewall: Firewall, src_ip: str
+) -> Optional[FirewallZone]:
+    """在 firewall 的所有 zone 中找 src_ip 命中的 protected_ips 段"""
+    try:
+        ip_obj = ipaddress.ip_address(src_ip)
+    except ValueError:
+        return None
+    for zone in (firewall.zones or []):
+        if not zone.protected_ips:
+            continue
+        for line in zone.protected_ips.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                if ip_obj in ipaddress.ip_network(line, strict=False):
+                    return zone
+            except Exception:
+                continue
+    return None
+
+
+def _find_zone_access_cfg_by_boundary_zones(
+    firewall: Firewall,
+    source_zone: str,
+    dest_zone: str,
+) -> Optional[ZoneAccessConfig]:
+    """按 boundary_source_zone / boundary_dest_zone 找 cfg"""
+    for cfg in _get_boundary_cfgs(firewall):
+        if cfg.boundary_source_zone == source_zone and cfg.boundary_dest_zone == dest_zone:
+            return cfg
+    return None
+
+
+def _lookup_zone_access_cfg(firewall: Firewall, db: Session) -> Optional[ZoneAccessConfig]:
+    """
+    找本墙的第一个边界 cfg (按 firewall_id 简单过滤)。
+
+    重构.md 新设计: cfg 数据已迁到 ZoneAccessConfig 表, 由 firewall.zone_access_configs
+    关联访问。如果 firewall 有多个 cfg, 返回第一个 (后续可根据 source_region/dest_region 精筛)。
+    """
+    cfgs = _get_boundary_cfgs(firewall)
+    if not cfgs:
+        # 兜底: 直接查 DB (兼容 zones/zone_access_configs 关联未加载的场景)
+        cfgs = (
+            db.query(ZoneAccessConfig)
+            .filter_by(firewall_id=firewall.id)
+            .all()
+        )
+    return cfgs[0] if cfgs else None
 
 
 # ============================================================
@@ -120,11 +194,12 @@ class ChainPlanner:
             match_contexts = []
 
         # 拆分成单 IP 策略 (笛卡尔积)
+        # spec 删了 Policy.action, 固定 "permit" (默认 permit, 旧 action 列已废弃)
         single_ip_policies = self.splitter.split_policy_to_single_ips(
             policy.source_ip or "",
             policy.dest_ip or "",
             policy.service or "",
-            policy.action or "permit",
+            "permit",  # action 已删除, 默认 permit
         )
 
         usage_time = usage_time_by_id.get(policy.id, "")
@@ -217,66 +292,31 @@ class ChainPlanner:
         边界墙触发 SNAT 时, 登记到 boundary_snat_map[target_region],
         供 Pass 2 时下游 fw 查 SNAT 后 src。
 
-        target_region 推导 (跟 D 方案严格版一致):
+        target_region 推导 (新设计 — 用 ZoneAccessConfig 替代 Firewall.covered_region):
           - 入向 (source_zone=external): 转换后 src 进入 fw internal 一侧,
-            下游 fw (同 covered_region) 看到 src = 转换后 IP
-            → target_region = firewall.covered_region
+            下游 fw (同 belong_region) 看到 src = 转换后 IP
+            → target_region = firewall.belong_region
           - 出向 (source_zone=internal): 转换后 src 落在 fw external 一侧,
-            下游 fw (对方 covered_region) 看到 src = 转换后 IP
-            → target_region = cfg.dest_zone (对方 covered_region)
+            下游 fw (对方 belong_region) 看到 src = 转换后 IP
+            → target_region = cfg.dest_region (对方 belong_region)
         """
         translated_src_ip = nat_info["snat_address"]
 
         if nat_info.get("source_zone") == "external":
             # 入向 SNAT
-            target_region = firewall.covered_region or firewall.region
+            target_region = firewall.belong_region
         else:
             # 出向 SNAT
-            cfg = self._lookup_zone_access_cfg(firewall)
-            # 找不到 cfg 时不能再 fallback 到 firewall.covered_region (那是同侧, 不是对方)
+            cfg = _lookup_zone_access_cfg(firewall, self.db)
+            # 找不到 cfg 时不能再 fallback 到 firewall.belong_region (那是同侧, 不是对方)
             # → 这种情况 SNAT 转换对下游 fw 无意义, 但仍登记, 由 preview 端排查告警
-            target_region = cfg.dest_zone if cfg else (firewall.covered_region or firewall.region)
+            target_region = cfg.dest_region if cfg else firewall.belong_region
 
         ctx.boundary_snat_map[target_region] = {
             "translated_src_ip": translated_src_ip,
             "via_firewall": {"id": firewall.id, "name": firewall.name},
             "firewall_id": firewall.id,
         }
-
-    def _lookup_zone_access_cfg(self, firewall: Firewall) -> Optional[ZoneAccessConfig]:
-        """
-        找本墙的出向 cfg (source_zone=本墙, dest_zone=对方)。
-
-        优先级:
-          1. cfg.dest_zone == firewall.external_zone_name (理想匹配)
-          2. cfg.source_zone == firewall.covered_region (兼容命名不一致)
-          3. substring 双向匹配 (兜底)
-        """
-        cfg = (
-            self.db.query(ZoneAccessConfig)
-            .filter_by(firewall_id=firewall.id, dest_zone=firewall.external_zone_name)
-            .first()
-        )
-        if cfg:
-            return cfg
-
-        # Fallback 1: zone_name 命名不一致 (e.g. fw.external_zone_name="untrust" vs cfg.dest_zone="生产区")
-        all_cfgs = (
-            self.db.query(ZoneAccessConfig).filter_by(firewall_id=firewall.id).all()
-        )
-        own_region = firewall.covered_region or firewall.region
-        for c in all_cfgs:
-            if c.source_zone == own_region:
-                return c
-
-        # Fallback 2: substring 匹配
-        for c in all_cfgs:
-            if (firewall.external_zone_name and firewall.external_zone_name in c.dest_zone) or (
-                c.dest_zone and c.dest_zone in firewall.external_zone_name
-            ):
-                return c
-
-        return None
 
     # ----------------------------------------------------------
     # Pass 2: 处理 pending inbound sp
@@ -299,7 +339,7 @@ class ChainPlanner:
             boundary_fw = boundary_match["boundary_fw"]
             usage_time = pending["usage_time"]
 
-            target_region_key = firewall.covered_region or firewall.region
+            target_region_key = firewall.belong_region
             snat_info = ctx.boundary_snat_map.get(target_region_key)
 
             if snat_info and snat_info["firewall_id"] != firewall.id:
@@ -387,7 +427,7 @@ class ChainPlanner:
                 "dest_system_name": policy.dest_system_name,
                 "dest_ip": sp["dest_ip"],
                 "service": sp["service"],
-                "action": sp["action"],
+                "action": sp.get("action", "permit"),  # sp.action 来自 splitter (非 Policy.action)
                 "direction": sp["direction"],
                 "nat_info": nat_info,
                 "使用时间": usage_time,
@@ -412,7 +452,7 @@ class ChainPlanner:
             "dest_system_name": policy.dest_system_name,
             "dest_ip": sp["dest_ip"],
             "service": sp["service"],
-            "action": sp["action"],
+            "action": sp.get("action", "permit"),
             "not_pushed_reason": reason,
             "使用时间": usage_time,
         }
@@ -426,7 +466,7 @@ class ChainPlanner:
 
 
 # ============================================================
-# D 方案 helper: 找 src_ip 关联的 boundary fw + SNAT 池
+# D 方案 helper: 找 src_ip 关联的 boundary fw + SNAT 池 (新设计)
 # ============================================================
 def _find_boundary_fw_for_src(
     src_ip: str, current_fw: Firewall, db: Session
@@ -438,6 +478,13 @@ def _find_boundary_fw_for_src(
       正向访问: src 在 boundary fw internal 段 (src 在 boundary 后面, boundary outbound SNAT)
       反向访问: src 在 boundary fw external 段 (src 在 boundary 前面, boundary inbound SNAT)
       这两种情况下, 当前 fw 物理上看到的 src 应该是 SNAT 后 IP (Pass 2 替换)
+
+    新设计 (2026-06-22):
+      - firewall 不再有 internal_protected_ips / external_protected_ips / outbound_snat_pool /
+        inbound_snat_pool
+      - 改为通过 firewall.zones[].protected_ips 找命中的 zone
+      - 命中的 zone.zone_name 在哪个 boundary_* 位置上, 就对应 cfg 的 source_region/dest_region,
+        cfg.snat_pool 即为 SNAT 池
 
     Returns:
       None — 没命中 (sp.src 不在任何 boundary fw 管辖范围)
@@ -460,36 +507,48 @@ def _find_boundary_fw_for_src(
     )
 
     for other_fw in other_boundary_fws:
-        # 正向: src 在 boundary fw internal 段 (boundary outbound SNAT)
-        cidr_text = other_fw.internal_protected_ips or ""
-        for line in cidr_text.split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                if src_ip_obj in ipaddress.ip_network(line, strict=False):
-                    return {
-                        "boundary_fw": other_fw,
-                        "snat_pool": other_fw.outbound_snat_pool,
-                        "direction": "outbound",
-                    }
-            except Exception:
-                continue
+        # 加载关联 (zones / zone_access_configs)
+        zones = _get_firewall_zones_dict(other_fw)
+        cfgs = _get_boundary_cfgs(other_fw)
+        if not zones:
+            zones = {
+                z.zone_name: z
+                for z in db.query(FirewallZone).filter_by(firewall_id=other_fw.id).all()
+            }
+        if not cfgs:
+            cfgs = (
+                db.query(ZoneAccessConfig).filter_by(firewall_id=other_fw.id).all()
+            )
 
-        # 反向: src 在 boundary fw external 段 (boundary inbound SNAT)
-        cidr_text = other_fw.external_protected_ips or ""
-        for line in cidr_text.split("\n"):
-            line = line.strip()
-            if not line:
+        # 在所有 zone 的 protected_ips 里找 src_ip
+        for zone_name, zone in zones.items():
+            if not zone.protected_ips:
                 continue
-            try:
-                if src_ip_obj in ipaddress.ip_network(line, strict=False):
-                    return {
-                        "boundary_fw": other_fw,
-                        "snat_pool": other_fw.inbound_snat_pool,
-                        "direction": "inbound",
-                    }
-            except Exception:
-                continue
+            for line in zone.protected_ips.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    if src_ip_obj not in ipaddress.ip_network(line, strict=False):
+                        continue
+                except Exception:
+                    continue
+                # 命中 → 找 cfg 决定方向 + SNAT 池
+                for cfg in cfgs:
+                    if cfg.boundary_source_zone == zone_name and cfg.need_nat:
+                        # 正向: src 在 boundary 的 source_zone 侧 (boundary outbound SNAT)
+                        return {
+                            "boundary_fw": other_fw,
+                            "snat_pool": cfg.snat_pool,
+                            "direction": "outbound",
+                        }
+                    if cfg.boundary_dest_zone == zone_name and cfg.need_nat:
+                        # 反向: src 在 boundary 的 dest_zone 侧 (boundary inbound SNAT)
+                        return {
+                            "boundary_fw": other_fw,
+                            "snat_pool": cfg.snat_pool,
+                            "direction": "inbound",
+                        }
+                # zone 命中但没配 cfg / 没开 need_nat → 跳到下个 zone
 
     return None

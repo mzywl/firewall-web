@@ -1,3 +1,7 @@
+"""Pydantic schemas — 对齐 重构.md §1 spec
+
+对应 models/__init__.py 的精简后字段集合。
+"""
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List
 from datetime import datetime
@@ -13,29 +17,24 @@ class OrderStatus(str, Enum):
 
 
 class FirewallType(str, Enum):
-    """防火墙类型"""
+    """防火墙厂商类型 (重构.md §1 精简后)"""
     fortigate = "fortigate"
-    hillstone = "hillstone"
-    leadsec = "leadsec"
-    h3c = "h3c"
-    guanqun = "guanqun"
-    feita = "feita"
-    wangshen = "wangshen"
-    sangfor = "sangfor"
     huawei = "huawei"
-    shanshi = "shanshi"
+    h3c = "h3c"
+    hillstone = "hillstone"
+    sangfor = "sangfor"
     other = "other"
 
 
 class ConnectionType(str, Enum):
-    """连接方式"""
+    """连接方式 (重构.md §1 只保留 ssh/api)"""
     ssh = "ssh"
     api = "api"
-    cli = "cli"
-    manual = "manual"
 
 
+# ==========================================
 # Order Schemas
+# ==========================================
 class OrderBase(BaseModel):
     title: str = Field(..., max_length=200)
     description: Optional[str] = None
@@ -64,76 +63,78 @@ class OrderResponse(OrderBase):
         from_attributes = True
 
 
-# Policy Schemas
+# ==========================================
+# Policy Schemas (对齐 spec 精简)
+# ==========================================
 class PolicyBase(BaseModel):
-    source_zone: Optional[str] = None
-    dest_zone: Optional[str] = None
-    source_ip: Optional[str] = None
-    dest_ip: Optional[str] = None
-    service: Optional[str] = None
-    action: Optional[str] = None
+    """Policy 基础字段 (对齐 重构.md §1)"""
+    source_system_name: Optional[str] = Field(None, max_length=100, description="源系统名(Excel 解析)")
+    dest_system_name: Optional[str] = Field(None, max_length=100, description="目的系统名(Excel 解析)")
+    source_ip: Optional[str] = Field(None, description="源 IP")
+    dest_ip: Optional[str] = Field(None, description="目的 IP")
+    service: Optional[str] = Field(None, description="服务/端口")
+    usage_time: Optional[str] = Field(None, description="使用时间")
 
 
 class PolicyCreate(PolicyBase):
     order_id: int
-    firewall_id: Optional[int] = None
+    firewall_id: int  # spec 强制 NN
+
+
+class PolicyUpdate(BaseModel):
+    """编辑工单时更新 Policy"""
+    source_ip: Optional[str] = None
+    dest_ip: Optional[str] = None
+    service: Optional[str] = None
+    usage_time: Optional[str] = None
+    source_system_name: Optional[str] = None
+    dest_system_name: Optional[str] = None
+    device_source_zone: Optional[str] = None
+    device_dest_zone: Optional[str] = None
 
 
 class PolicyResponse(PolicyBase):
+    """Policy 响应 (对齐 spec 字段)"""
     id: int
     order_id: int
-    firewall_id: Optional[int] = None
-    is_merged: int
+    firewall_id: int
+    device_source_zone: str
+    device_dest_zone: str
+    source_snat_ip: Optional[str] = None
     push_status: Optional[str] = None
+    push_result: Optional[str] = None
+    pushed_at: Optional[datetime] = None
     created_at: datetime
 
     class Config:
         from_attributes = True
 
 
-# Firewall Schemas
+# ==========================================
+# Firewall Schemas (精简后)
+# ==========================================
 class FirewallBase(BaseModel):
     name: str = Field(..., max_length=200)
     alias: Optional[str] = Field(None, max_length=100)
     type: FirewallType
     management_ip: str = Field(..., max_length=50)
-    
-    # 区域信息
-    region: Optional[str] = Field(None, max_length=100, description="所属区域(组织归属)")
-    # covered_region 表达 "防护区域" (技术属性, 跟 region "所在区域" 区分), 默认=region
-    covered_region: Optional[str] = Field(None, max_length=100, description="防护区域(NAT 透传 key, 跟 region 区分)")
-    local_zone_name: Optional[str] = Field(None, max_length=100)
-    external_zone_name: Optional[str] = Field(None, max_length=100)
-    
-    # 连接方式
+
+    belong_region: Optional[str] = Field(None, max_length=100, description="所属大区(组织归属)")
+    is_zone_boundary: int = Field(default=0, description="是否区域边界防火墙")
+
     connection_type: ConnectionType = Field(default=ConnectionType.ssh)
     connection_config: Optional[dict] = None
-    
-    # 防护范围（分内部和外部）
-    internal_protected_ips: Optional[str] = None
-    external_protected_ips: Optional[str] = None
-    is_zone_boundary: int = Field(default=0, description="是否区域边界防火墙(0:否, 1:是)；仅边界防火墙需配 NAT 地址池")
-    # supported_policy_types 已废弃（UI 隐藏），保留字段以兼容旧数据
-    supported_policy_types: Optional[List[str]] = None
 
-    # SNAT 地址池（仅当 is_zone_boundary=1 时由 UI 显示和填写）
-    # 项目已决定不再分析 DNAT，所以只保留 SNAT 相关字段
-    outbound_snat_pool: Optional[str] = None
-    inbound_snat_pool: Optional[str] = None
-    
-    # 推送配置
     auto_push: int = Field(default=1)
-    push_contact: Optional[str] = None
-    push_remark: Optional[str] = None
     status: str = Field(default="enabled")
-    remark: Optional[str] = None
-    
+    is_active: int = Field(default=1)
+
     @validator('type', pre=True)
     def lowercase_type(cls, v):
         if isinstance(v, str):
             return v.lower()
         return v
-    
+
     @validator('connection_type', pre=True)
     def lowercase_connection_type(cls, v):
         if isinstance(v, str):
@@ -146,37 +147,25 @@ class FirewallCreate(FirewallBase):
 
 
 class FirewallUpdate(BaseModel):
+    """更新防火墙 (spec 字段)"""
     name: Optional[str] = None
     alias: Optional[str] = None
     type: Optional[FirewallType] = None
     management_ip: Optional[str] = None
-    
-    region: Optional[str] = None
-    local_zone_name: Optional[str] = None
-    external_zone_name: Optional[str] = None
-    
+
+    belong_region: Optional[str] = None
+    is_zone_boundary: Optional[int] = None
+
     connection_type: Optional[ConnectionType] = None
     connection_config: Optional[dict] = None
-    
-    internal_protected_ips: Optional[str] = None
-    external_protected_ips: Optional[str] = None
-    is_zone_boundary: Optional[int] = None
-    supported_policy_types: Optional[List[str]] = None
-    
-    outbound_snat_pool: Optional[str] = None
-    inbound_snat_pool: Optional[str] = None
-    
+
     auto_push: Optional[int] = None
-    push_contact: Optional[str] = None
-    push_remark: Optional[str] = None
     status: Optional[str] = None
-    remark: Optional[str] = None
     is_active: Optional[int] = None
 
 
 class FirewallResponse(FirewallBase):
     id: int
-    is_active: int
     created_at: datetime
     updated_at: datetime
 
@@ -184,25 +173,75 @@ class FirewallResponse(FirewallBase):
         from_attributes = True
 
 
-# OperationLog Schemas
-class OperationLogCreate(BaseModel):
-    order_id: Optional[int] = None
-    operation_type: str
-    operation_detail: Optional[str] = None
-    operator: Optional[str] = None
-    result: Optional[str] = None
-    error_message: Optional[str] = None
+# ==========================================
+# FirewallZone Schemas
+# ==========================================
+class FirewallZoneBase(BaseModel):
+    firewall_id: int
+    zone_name: str = Field(..., max_length=100)
+    protected_ips: Optional[str] = None
+    connect_region: str = Field(..., max_length=100, description="安全域连接的大区")
 
 
-class OperationLogResponse(OperationLogCreate):
+class FirewallZoneCreate(FirewallZoneBase):
+    pass
+
+
+class FirewallZoneUpdate(BaseModel):
+    zone_name: Optional[str] = None
+    protected_ips: Optional[str] = None
+    connect_region: Optional[str] = None
+
+
+class FirewallZoneResponse(FirewallZoneBase):
     id: int
     created_at: datetime
+    updated_at: datetime
 
     class Config:
         from_attributes = True
 
 
+# ==========================================
+# ZoneAccessConfig Schemas (新字段对齐 spec)
+# ==========================================
+class ZoneAccessConfigBase(BaseModel):
+    firewall_id: int = Field(..., description="扼守此大区通道的边界防火墙ID")
+    source_region: str = Field(..., max_length=100, description="源宏观大区名称")
+    dest_region: str = Field(..., max_length=100, description="目的宏观大区名称")
+    boundary_source_zone: str = Field(..., max_length=100, description="边界墙面向源大区的本地 Zone 名称")
+    boundary_dest_zone: str = Field(..., max_length=100, description="边界墙面向目的大区的本地 Zone 名称")
+    need_nat: int = Field(default=0, description="此跨区路径是否强制 SNAT")
+    snat_pool: Optional[str] = Field(None, max_length=500, description="SNAT 地址池")
+    description: Optional[str] = None
+
+
+class ZoneAccessConfigCreate(ZoneAccessConfigBase):
+    pass
+
+
+class ZoneAccessConfigUpdate(BaseModel):
+    source_region: Optional[str] = None
+    dest_region: Optional[str] = None
+    boundary_source_zone: Optional[str] = None
+    boundary_dest_zone: Optional[str] = None
+    need_nat: Optional[int] = None
+    snat_pool: Optional[str] = None
+    description: Optional[str] = None
+
+
+class ZoneAccessConfigResponse(ZoneAccessConfigBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ==========================================
 # PolicyVersion Schemas
+# ==========================================
 class PolicyVersionCreate(BaseModel):
     order_id: int
     version_type: str  # 'original', 'formatted', 'user_modified'
@@ -214,6 +253,23 @@ class PolicyVersionResponse(BaseModel):
     order_id: int
     version_type: str
     data: dict
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ==========================================
+# PushLog / PushSnapshot (新增 spec 字段)
+# ==========================================
+class PushLogResponse(BaseModel):
+    id: int
+    snapshot_id: int
+    seq: int
+    stage: str
+    level: str
+    message: str
+    data_json: Optional[str] = None
     created_at: datetime
 
     class Config:
