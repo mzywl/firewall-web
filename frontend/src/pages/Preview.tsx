@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, AlertTriangle, FileCode } from 'lucide-react';
+import { ArrowLeft, AlertTriangle, FileCode, ChevronDown, ChevronRight } from 'lucide-react';
 import { Button } from '../components/ui/Button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../components/ui/Card';
 import { UnmatchedPoliciesTable } from '../components/preview/UnmatchedPoliciesTable';
@@ -25,6 +25,8 @@ export const Preview = () => {
   const [loading, setLoading] = useState(true);
   const [autoExecute, setAutoExecute] = useState<Record<number, boolean>>({});
   const [scriptModalFirewall, setScriptModalFirewall] = useState<PreviewFirewall | null>(null);
+  // 异常提示折叠状态 (2026-06-22): 默认折叠, 点击展开
+  const [anomaliesExpanded, setAnomaliesExpanded] = useState(false);
 
   useEffect(() => {
     loadPreviewData();
@@ -108,15 +110,33 @@ export const Preview = () => {
         </Button>
       </div>
 
-      {/* 警告和错误提示 */}
+      {/* 警告和错误提示 (2026-06-22: 默认折叠, 点击展开, 头部显示计数徽章) */}
       {(previewData.warnings.length > 0 || previewData.errors.length > 0 || previewData.unmatched_policies.length > 0) && (
         <Card className="border-yellow-500 bg-yellow-50">
-          <CardHeader>
-            <div className="flex items-center gap-2">
-              <AlertTriangle className="h-5 w-5 text-yellow-600" />
-              <CardTitle className="text-yellow-800">异常提示</CardTitle>
+          <CardHeader
+            className="cursor-pointer select-none hover:bg-yellow-100 transition-colors"
+            onClick={() => setAnomaliesExpanded(!anomaliesExpanded)}
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                {anomaliesExpanded ? (
+                  <ChevronDown className="h-4 w-4 text-yellow-700" />
+                ) : (
+                  <ChevronRight className="h-4 w-4 text-yellow-700" />
+                )}
+                <AlertTriangle className="h-5 w-5 text-yellow-600" />
+                <CardTitle className="text-yellow-800">异常提示</CardTitle>
+                {/* 计数徽章: 默认折叠时一眼看到数量, 不展开也知道有多少 */}
+                <span className="text-xs px-2 py-0.5 rounded-full bg-yellow-200 text-yellow-800">
+                  {previewData.errors.length + previewData.warnings.length + previewData.unmatched_policies.length} 条
+                </span>
+              </div>
+              <span className="text-xs text-yellow-600">
+                {anomaliesExpanded ? '点击折叠' : '点击展开'}
+              </span>
             </div>
           </CardHeader>
+          {anomaliesExpanded && (
           <CardContent className="space-y-2">
             {previewData.errors.length > 0 && (
               <div>
@@ -147,6 +167,7 @@ export const Preview = () => {
               </div>
             )}
           </CardContent>
+          )}
         </Card>
       )}
 
