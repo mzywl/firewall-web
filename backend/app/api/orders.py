@@ -167,6 +167,55 @@ def get_order_policies(order_id: int, version: str = None, db: Session = Depends
     return result
 
 
+@router.delete("/{order_id}/policies/{policy_id}", status_code=204)
+def delete_order_policy(
+    order_id: int, policy_id: int, db: Session = Depends(get_db)
+):
+    """
+    删除工单下的某条策略 (2026-06-22: 给策略预览页 "删除" 按钮用)
+
+    铁律:
+      - 只能删原始 Excel 导入的策略 (Policy 表), 推上墙后的 (PushedPolicyItem) 不归本接口
+      - 删之前先查 order 存在 (防 404 漏检)
+      - 删 Policy 同时清掉 user_modified 快照里的对应条目, 避免下次 preview 又显出来
+    """
+    from app.models import Policy, PolicyVersion
+
+    order = db.query(Order).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="工单不存在")
+
+    policy = db.query(Policy).filter(
+        Policy.id == policy_id, Policy.order_id == order_id
+    ).first()
+    if not policy:
+        raise HTTPException(status_code=404, detail=f"策略 {policy_id} 不存在")
+
+    db.delete(policy)
+    db.flush()  # 触发 FK 检查, 避免 commit 后才发现被引用
+
+    # 清 user_modified 快照里对应条目 (PolicyVersion.data.policies 是个 list[dict])
+    # 注: data 是 JSON/JSONB 列, SQLAlchemy 不会自动 track dict in-place 变更,
+    #     用 sqlalchemy.orm.attributes.flag_modified 显式标记 dirty
+    from sqlalchemy.orm.attributes import flag_modified
+    user_modified = db.query(PolicyVersion).filter(
+        PolicyVersion.order_id == order_id,
+        PolicyVersion.version_type == "user_modified",
+    ).first()
+    if user_modified and user_modified.data:
+        policies_in_snap = user_modified.data.get("policies", [])
+        before = len(policies_in_snap)
+        user_modified.data["policies"] = [
+            p for p in policies_in_snap if p.get("id") != policy_id
+        ]
+        if len(user_modified.data["policies"]) != before:
+            flag_modified(user_modified, "data")
+            db.flush()
+
+    db.commit()
+    return None
+
+
 @router.get("/{order_id}/versions")
 def get_order_versions(order_id: int, db: Session = Depends(get_db)):
     """

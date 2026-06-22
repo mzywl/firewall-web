@@ -72,6 +72,32 @@ def client():
     with TestClient(app) as c:
         yield c
 
+@pytest.fixture
+def client():
+    """FastAPI TestClient (走 fastapi_app, 不是 socketio 包装)"""
+    with TestClient(app) as c:
+        yield c
+
+
+@pytest.fixture
+def client_with_db(db_session):
+    """TestClient 跟 db_session 共享同一个 session (避免 SQLite memory 跨连接盲区)
+
+    适用: 测试 fixture 自己造数据, 然后调 client 端点验证 (数据能被 client 看到)
+    """
+    from app.database import get_db as _get_db
+    def _override():
+        try:
+            yield db_session
+        finally:
+            pass
+    app.dependency_overrides[_get_db] = _override
+    try:
+        with TestClient(app) as c:
+            yield c
+    finally:
+        app.dependency_overrides.pop(_get_db, None)
+
 
 # ============================================================
 # Factory fixtures - 快速造测试数据 (对齐 spec)

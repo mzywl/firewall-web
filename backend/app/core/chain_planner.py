@@ -403,9 +403,11 @@ class ChainPlanner:
             "snat_address": translated_src,
             "via_firewall": via_firewall,
         }
+        # 2026-06-22 透传原始 src IP 给前端 (UI 显示 "经 X 墙 SNAT 转换, 原 src=10.x.x.x")
         self._append_to_group(
             ctx, firewall, policy, sp, new_nat_info, usage_time,
             source_ip_override=translated_src,
+            original_source_ip=sp["source_ip"],
         )
 
     # ----------------------------------------------------------
@@ -424,29 +426,32 @@ class ChainPlanner:
         nat_info: Dict,
         usage_time: str,
         source_ip_override: Optional[str] = None,
+        original_source_ip: Optional[str] = None,  # 2026-06-22: Pass 2 SNAT 透传前的原始 src
     ) -> None:
         """上墙: 把 sp 追加到 firewall_groups[fw.id]['policies']"""
         self._ensure_firewall_group(ctx, firewall)
-        ctx.firewall_groups[firewall.id]["policies"].append(
-            {
-                "original_policy_id": policy.id,
-                "source_system_name": policy.source_system_name,
-                "source_ip": source_ip_override or sp["source_ip"],
-                "dest_system_name": policy.dest_system_name,
-                "dest_ip": sp["dest_ip"],
-                "service": sp["service"],
-                "action": sp.get("action", "permit"),  # sp.action 来自 splitter (非 Policy.action)
-                "direction": sp["direction"],
-                "src_zone_name": sp.get("src_zone_name"),  # 新增 (2026-06-22): merger key 维度
-                "dst_zone_name": sp.get("dst_zone_name"),  # 新增 (2026-06-22): merger key 维度
-                "nat_info": nat_info,
-                "使用时间": usage_time,
-                "original_data": {
-                    "source_system_name": policy.source_system_name,
-                    "dest_system_name": policy.dest_system_name,
-                },
-            }
-        )
+        entry = {
+            "original_policy_id": policy.id,
+            "source_system_name": policy.source_system_name,
+            "source_ip": source_ip_override or sp["source_ip"],
+            "dest_system_name": policy.dest_system_name,
+            "dest_ip": sp["dest_ip"],
+            "service": sp["service"],
+            "action": sp.get("action", "permit"),  # sp.action 来自 splitter (非 Policy.action)
+            "direction": sp["direction"],
+            "src_zone_name": sp.get("src_zone_name"),  # 新增 (2026-06-22): merger key 维度
+            "dst_zone_name": sp.get("dst_zone_name"),  # 新增 (2026-06-22): merger key 维度
+            "nat_info": nat_info,
+            "使用时间": usage_time,
+        }
+        # 2026-06-22: 只在 Pass 2 SNAT 透传时存, 让前端展示 "原 src=..."
+        if original_source_ip is not None:
+            entry["original_source_ip"] = original_source_ip
+        entry["original_data"] = {
+            "source_system_name": policy.source_system_name,
+            "dest_system_name": policy.dest_system_name,
+        }
+        ctx.firewall_groups[firewall.id]["policies"].append(entry)
 
     def _build_not_pushed_entry(
         self,

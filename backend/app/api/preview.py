@@ -7,7 +7,7 @@
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import List, Dict, Optional, Any
+from typing import List, Dict
 import logging
 
 from app.database import get_db
@@ -90,6 +90,7 @@ def get_preview_data(order_id: int, db: Session = Depends(get_db)):
                 "management_ip": group["firewall"].management_ip,
                 # 新设计 (2026-06-22): covered_region/local_zone_name/external_zone_name/push_contact 已删除
                 "belong_region": group["firewall"].belong_region,
+                # 2026-06-22: 前端用 is_zone_boundary 加 "将在此墙推送" 标识
                 "is_zone_boundary": group["firewall"].is_zone_boundary,
                 "auto_push": group["firewall"].auto_push,
             },
@@ -119,35 +120,52 @@ def _build_nat_policies(
     nat_analyzer: NATAnalyzer,
 ) -> List[Dict]:
     """
-    渲染 NAT 转换行 (SNAT-only)
+    渲染 NAT 转换行 (SNAT 透传 + 自身 SNAT)
 
-    只在 nat_info.nat_type == 'SNAT' 时生成 (即 boundary fw 自己, D 方案 C 简化版).
-    合并后 sp.source_ip 已经是最终上墙的 IP (boundary fw 自己用原始, 后游墙是 SNAT 后),
-    重新跑 nat_analyzer 拿 zone 名称用于渲染, 保留 Pass 2 塞的 snat_address / via_firewall.
+    2026-06-22 重构: 区分两种 SNAT 行
+      - "SNAT": boundary fw 自己转换 (蓝行)
+      - "PASS_THROUGH": 下游 fw 被上游 boundary SNAT 透传 (绿行, 显示原 src IP)
     """
     if not merged_policy.get("original_data"):
         return []
 
-    nat_info = merged_policy.get("nat_info") or nat_analyzer.analyze_policy_with_context(
+    rows = []
+
+    # 情形 1: Pass 2 SNAT 透传 (D 方案) — merged_policy.nat_info 里有 via_firewall + snat_address
+    nat_info = merged_policy.get("nat_info") or {}
+    if nat_info.get("via_firewall") and nat_info.get("snat_address"):
+        via = nat_info["via_firewall"]
+        original_src = merged_policy.get("original_source_ip", merged_policy["source_ip"])
+        rows.append({
+            "type": "PASS_THROUGH",
+            "source_zone": merged_policy.get("source_system_name") or "-",
+            "source_ip": nat_info["snat_address"],  # 透传后 src (上游 boundary SNAT 后)
+            "dest_zone": merged_policy.get("dest_system_name") or "-",
+            "dest_ip": merged_policy["dest_ip"],
+            "service": merged_policy["service"],
+            "action": merged_policy.get("action", "permit"),
+            "via_firewall": via,
+            "original_source_ip": original_src,  # 2026-06-22 透传原 IP 给前端展示
+        })
+
+    # 情形 2: boundary fw 自身需要 SNAT 转换 (蓝行, 显示转换后 src)
+    nat_info_for_self = nat_analyzer.analyze_policy_with_context(
         merged_policy["source_ip"].split("\n")[0],
         merged_policy["dest_ip"].split("\n")[0],
         firewall,
         match_context=None,
     )
+    # 保留 Pass 2 塞的 SNAT 透传信息 (即使自身不需要 SNAT 也要透传这俩字段给前端)
+    merged_policy["nat_info"] = nat_info_for_self
+    if nat_info.get("snat_address"):
+        merged_policy["nat_info"]["snat_address"] = nat_info["snat_address"]
+    if nat_info.get("via_firewall"):
+        merged_policy["nat_info"]["via_firewall"] = nat_info["via_firewall"]
 
-    # 保留 Pass 2 塞的 SNAT 透传信息 (D 方案 fw14 的 nat_info.snat_address + via_firewall)
-    preserved_snat = merged_policy.get("nat_info", {}).get("snat_address")
-    preserved_via = merged_policy.get("nat_info", {}).get("via_firewall")
-    merged_policy["nat_info"] = nat_info
-    if preserved_snat:
-        merged_policy["nat_info"]["snat_address"] = preserved_snat
-    if preserved_via:
-        merged_policy["nat_info"]["via_firewall"] = preserved_via
+    if nat_info_for_self.get("nat_type") == "SNAT" and not rows:
+        rows.extend(_generate_snat_row(merged_policy, nat_info_for_self))
 
-    # 只 boundary fw 自己生成 SNAT 转换行
-    if nat_info.get("nat_type") == "SNAT":
-        return _generate_snat_row(merged_policy, nat_info)
-    return []
+    return rows
 
 
 # 向后兼容别名 (test_merger_pass_through_list 等老测试用旧名)

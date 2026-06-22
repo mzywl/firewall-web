@@ -43,6 +43,24 @@ class FirewallZoneUpdate(BaseModel):
     zone_role: Optional[str] = None
 
 
+@router.get("/all")
+def get_all_firewall_zones(db: Session = Depends(get_db)):
+    """聚合所有 firewall 的 zone 数量, 给 /firewalls 列表页用
+
+    2026-06-22: 之前 FirewallManagement 前端循环拉 /firewall-zones/firewall/{fw.id}
+    是 N+1, 大列表性能差; 现在一次拉全表, 前端按 firewall_id 聚合即可。
+
+    返回: {"firewall_zones": [{"firewall_id": int, "zone_count": int}, ...]}
+    """
+    from sqlalchemy import func
+    rows = (
+        db.query(FirewallZone.firewall_id, func.count(FirewallZone.id))
+        .group_by(FirewallZone.firewall_id)
+        .all()
+    )
+    return {"firewall_zones": [{"firewall_id": fw_id, "zone_count": cnt} for fw_id, cnt in rows]}
+
+
 @router.get("/firewall/{firewall_id}")
 def get_firewall_zones(firewall_id: int, db: Session = Depends(get_db)):
     """获取指定防火墙的所有区域"""
