@@ -252,6 +252,50 @@ def delete_zone_access_config(config_id: int, db: Session = Depends(get_db)):
     return {"message": "配置已删除"}
 
 
+@router.put("/configs/{config_id}")
+def update_zone_access_config(
+    config_id: int,
+    config: ZoneAccessConfigCreate,
+    db: Session = Depends(get_db),
+):
+    """按 id 更新配置 (支持改 source/dest region)
+
+    注: /save 是按 (source_region, dest_region, firewall_id) upsert, 不支持改这三字段。
+    本端点直接按 PK 更新, 适合前端 per-firewall 子页的「编辑」按钮。
+    """
+    existing = db.query(ZoneAccessConfig).filter(ZoneAccessConfig.id == config_id).first()
+    if not existing:
+        raise HTTPException(status_code=404, detail="配置不存在")
+
+    existing.source_region = config.source_region
+    existing.dest_region = config.dest_region
+    existing.boundary_source_zone = config.boundary_source_zone
+    existing.boundary_dest_zone = config.boundary_dest_zone
+    existing.need_nat = config.need_nat
+    existing.snat_pool = config.snat_pool
+    existing.description = config.description
+    existing.firewall_id = config.firewall_id
+    existing.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(existing)
+
+    return {
+        "message": "配置已更新",
+        "config": {
+            "id": existing.id,
+            "source_region": existing.source_region,
+            "dest_region": existing.dest_region,
+            "boundary_source_zone": existing.boundary_source_zone,
+            "boundary_dest_zone": existing.boundary_dest_zone,
+            "need_nat": existing.need_nat,
+            "snat_pool": existing.snat_pool,
+            "firewall_id": existing.firewall_id,
+            "created_at": existing.created_at.isoformat(),
+            "updated_at": existing.updated_at.isoformat(),
+        },
+    }
+
+
 def _firewall_in_region(fw: Firewall, region: str) -> bool:
     """判断 firewall 是否覆盖 region
 

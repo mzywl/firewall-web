@@ -1,9 +1,22 @@
+/**
+ * 防火墙管理 (列表)
+ *
+ * 设计对应 重构.md §1 spec:
+ *   - 字段: name, alias, type, management_ip, belong_region (was region), connection_type,
+ *           is_zone_boundary, auto_push, status, is_active
+ *   - 删字段: covered_region, local_zone_name, external_zone_name, internal_protected_ips,
+ *             external_protected_ips, outbound_snat_pool, inbound_snat_pool,
+ *             allow_same_firewall_push, push_contact, push_remark, supported_policy_types, remark
+ *
+ * 新增列: zones 计数 + access configs 计数 (跳到详情页 / 子页)
+ */
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { Badge } from '../components/ui/Badge';
+import { Plus, Edit, Trash2, Layers, Network, ExternalLink } from 'lucide-react';
 import axios from 'axios';
 import { toast } from '../lib/toast';
 
@@ -12,42 +25,66 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '/api';
 interface Firewall {
   id: number;
   name: string;
-  alias?: string;
+  alias: string | null;
   type: string;
   management_ip: string;
+  belong_region: string | null;
   connection_type: string;
-  protected_ips?: string;
-  supported_policy_types?: string[];
+  is_zone_boundary: number;
   auto_push: number;
-  push_contact?: string;
   status: string;
   is_active: number;
   created_at: string;
   updated_at: string;
+  // 计数 (前端额外拉)
+  zones_count?: number;
+  access_configs_count?: number;
 }
 
 export default function FirewallManagement() {
-  const navigate = useNavigate();
   const [firewalls, setFirewalls] = useState<Firewall[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('');
-  const [filterType, setFilterType] = useState<string>('');
+  const [filterRegion, setFilterRegion] = useState<string>('');
 
   useEffect(() => {
     fetchFirewalls();
-  }, [filterStatus, filterType]);
+  }, [filterStatus]);
 
   const fetchFirewalls = async () => {
     try {
       setLoading(true);
       const params = new URLSearchParams();
       if (filterStatus) params.append('status', filterStatus);
-      if (filterType) params.append('type', filterType);
 
-      const response = await axios.get(`${API_BASE_URL}/firewalls?${params.toString()}`);
-      // 防御：API 返非数组（HTML fallback、null、{}）时显示空列表，不崩
-      setFirewalls(Array.isArray(response.data) ? response.data : []);
+      const [fwRes, zonesRes, cfgRes] = await Promise.all([
+        axios.get(`${API_BASE_URL}/firewalls?${params.toString()}`),
+        axios.get(`${API_BASE_URL}/firewall-zones/firewall/0`).catch(() => ({ data: { zones: [] } })),
+        axios.get(`${API_BASE_URL}/zone-access/configs`).catch(() => ({ data: { configs: [] } })),
+      ]);
+
+      const firewallList: Firewall[] = Array.isArray(fwRes.data) ? fwRes.data : [];
+
+      // 统计 zones 计数 (按 firewall_id 分组)
+      const zonesCountByFw: Record<number, number> = {};
+      (zonesRes.data.zones || []).forEach((z: any) => {
+        zonesCountByFw[z.firewall_id] = (zonesCountByFw[z.firewall_id] || 0) + 1;
+      });
+
+      // 统计 access configs 计数
+      const cfgCountByFw: Record<number, number> = {};
+      (cfgRes.data.configs || []).forEach((c: any) => {
+        cfgCountByFw[c.firewall_id] = (cfgCountByFw[c.firewall_id] || 0) + 1;
+      });
+
+      setFirewalls(
+        firewallList.map((fw) => ({
+          ...fw,
+          zones_count: zonesCountByFw[fw.id] || 0,
+          access_configs_count: cfgCountByFw[fw.id] || 0,
+        })),
+      );
     } catch (error) {
       toast.apiError(error, '获取防火墙列表失败');
       setFirewalls([]);
@@ -56,12 +93,12 @@ export default function FirewallManagement() {
     }
   };
 
-  const handleDelete = (id: number) => {
-    toast.confirm('确定要删除这个防火墙配置吗？', {
+  const handleDelete = (fw: Firewall) => {
+    toast.confirm(`确定要删除防火墙「${fw.name}」吗？关联的策略会一并删除。`, {
       confirmText: '确认删除',
       onConfirm: async () => {
         try {
-          await axios.delete(`${API_BASE_URL}/firewalls/${id}`);
+          await axios.delete(`${API_BASE_URL}/firewalls/${fw.id}`);
           toast.success('已删除');
           fetchFirewalls();
         } catch (error) {
@@ -71,166 +108,185 @@ export default function FirewallManagement() {
     });
   };
 
-  const filteredFirewalls = firewalls.filter(fw => {
-    const matchSearch = !searchTerm || 
+  // 收集所有大区 (用于 filter)
+  const allRegions = Array.from(
+    new Set(firewalls.map((f) => f.belong_region).filter(Boolean)),
+  ).sort();
+
+  const filteredFirewalls = firewalls.filter((fw) => {
+    const matchSearch =
+      !searchTerm ||
       fw.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
       fw.alias?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       fw.management_ip.includes(searchTerm);
-    return matchSearch;
+    const matchRegion = !filterRegion || fw.belong_region === filterRegion;
+    return matchSearch && matchRegion;
   });
 
-  const getTypeLabel = (type: string) => {
-    const typeMap: Record<string, string> = {
-      'h3c': 'H3C',
-      'huawei': '华为',
-      'sangfor': '深信服',
-      'shanshi': '山石',
-      'guanqun': '冠群',
-      'feita': '飞塔',
-      'wangshen': '网神',
-      'fortigate': 'Fortigate',
-      'hillstone': 'Hillstone',
-      'leadsec': '绿盟',
-      'other': '其他'
-    };
-    return typeMap[type] || type;
-  };
-
-  const getConnectionTypeLabel = (type: string) => {
-    const typeMap: Record<string, string> = {
-      'ssh': 'SSH',
-      'api': 'API',
-      'cli': 'CLI工具',
-      'manual': '手动'
-    };
-    return typeMap[type] || type;
-  };
-
   return (
-    <div className="container mx-auto p-6">
-      <div className="flex justify-between items-center mb-6">
-        <h1 className="text-3xl font-bold">防火墙管理</h1>
-        <Button onClick={() => navigate('/firewalls/new')}>
-          新增防火墙
-        </Button>
+    <div className="container mx-auto p-6 max-w-7xl">
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h1 className="text-3xl font-bold">防火墙管理</h1>
+          <p className="text-sm text-gray-500 mt-1">
+            共 {firewalls.length} 台防火墙 ({filteredFirewalls.length} 条匹配)
+          </p>
+        </div>
+        <Link to="/firewalls/new">
+          <Button>
+            <Plus className="w-4 h-4 mr-1" /> 新增防火墙
+          </Button>
+        </Link>
       </div>
 
-      {/* 搜索和筛选 */}
-      <Card className="mb-6 p-4">
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <Input
-            placeholder="搜索名称、别名或IP..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-          />
-          <select
-            className="px-3 py-2 border rounded-md"
-            value={filterStatus}
-            onChange={(e) => setFilterStatus(e.target.value)}
-          >
-            <option value="">全部状态</option>
-            <option value="enabled">启用</option>
-            <option value="disabled">禁用</option>
-          </select>
-          <select
-            className="px-3 py-2 border rounded-md"
-            value={filterType}
-            onChange={(e) => setFilterType(e.target.value)}
-          >
-            <option value="">全部类型</option>
-            <option value="h3c">H3C</option>
-            <option value="huawei">华为</option>
-            <option value="sangfor">深信服</option>
-            <option value="shanshi">山石</option>
-            <option value="guanqun">冠群</option>
-            <option value="feita">飞塔</option>
-            <option value="wangshen">网神</option>
-            <option value="fortigate">Fortigate</option>
-            <option value="hillstone">Hillstone</option>
-            <option value="leadsec">绿盟</option>
-            <option value="other">其他</option>
-          </select>
-          <Button variant="outline" onClick={fetchFirewalls}>
-            刷新
-          </Button>
+      <Card className="p-4 mb-4">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div>
+            <Input
+              placeholder="🔍 搜索名称 / 别名 / IP..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+            />
+          </div>
+          <div>
+            <select
+              className="w-full px-3 py-2 border rounded-md"
+              value={filterStatus}
+              onChange={(e) => setFilterStatus(e.target.value)}
+            >
+              <option value="">全部状态</option>
+              <option value="enabled">启用</option>
+              <option value="disabled">禁用</option>
+            </select>
+          </div>
+          <div>
+            <select
+              className="w-full px-3 py-2 border rounded-md"
+              value={filterRegion}
+              onChange={(e) => setFilterRegion(e.target.value)}
+            >
+              <option value="">全部大区</option>
+              {allRegions.map((r) => (
+                <option key={r!} value={r!}>
+                  {r}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
       </Card>
 
-      {/* 防火墙列表 */}
-      {loading ? (
-        <div className="text-center py-12">加载中...</div>
-      ) : filteredFirewalls.length === 0 ? (
-        <Card className="p-12 text-center text-gray-500">
-          暂无防火墙配置
-        </Card>
-      ) : (
-        <div className="grid gap-4">
-          {filteredFirewalls.map((fw) => (
-            <Card key={fw.id} className="p-6">
-              <div className="flex justify-between items-start">
-                <div className="flex-1">
-                  <div className="flex items-center gap-3 mb-2">
-                    <h3 className="text-xl font-semibold">{fw.name}</h3>
-                    {fw.alias && (
-                      <span className="text-gray-500">({fw.alias})</span>
-                    )}
-                    <Badge variant={fw.status === 'enabled' ? 'success' : 'secondary'}>
-                      {fw.status === 'enabled' ? '启用' : '禁用'}
-                    </Badge>
-                    <Badge variant="outline">{getTypeLabel(fw.type)}</Badge>
-                    <Badge variant="outline">{getConnectionTypeLabel(fw.connection_type)}</Badge>
-                  </div>
-                  
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm text-gray-600 mb-3">
-                    <div>
-                      <span className="font-medium">管理IP:</span> {fw.management_ip}
-                    </div>
-                    <div>
-                      <span className="font-medium">自动推送:</span> {fw.auto_push ? '是' : '否'}
-                    </div>
-                    {fw.push_contact && (
-                      <div>
-                        <span className="font-medium">责任人:</span> {fw.push_contact}
-                      </div>
-                    )}
-                    <div>
-                      <span className="font-medium">策略类型:</span> {fw.supported_policy_types?.join(', ') || '未设置'}
-                    </div>
-                  </div>
+      <Card className="overflow-hidden">
+        {loading ? (
+          <p className="text-sm text-gray-500 p-8 text-center">加载中...</p>
+        ) : filteredFirewalls.length === 0 ? (
+          <p className="text-sm text-gray-500 p-8 text-center">
+            没有匹配的防火墙
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 border-b">
+                <tr>
+                  <th className="px-4 py-3 text-left">名称</th>
+                  <th className="px-4 py-3 text-left">类型</th>
+                  <th className="px-4 py-3 text-left">管理 IP</th>
+                  <th className="px-4 py-3 text-left">所属大区</th>
+                  <th className="px-4 py-3 text-center">边界墙</th>
+                  <th className="px-4 py-3 text-center">
+                    <Layers className="w-4 h-4 inline" /> 安全域
+                  </th>
+                  <th className="px-4 py-3 text-center">
+                    <Network className="w-4 h-4 inline" /> 跨区配置
+                  </th>
+                  <th className="px-4 py-3 text-center">状态</th>
+                  <th className="px-4 py-3 text-right">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredFirewalls.map((fw) => (
+                  <tr key={fw.id} className="border-b hover:bg-gray-50">
+                    <td className="px-4 py-3">
+                      <Link to={`/firewalls/${fw.id}`} className="font-medium hover:text-blue-600">
+                        {fw.name}
+                        {fw.alias && (
+                          <span className="text-gray-500 text-xs ml-2">({fw.alias})</span>
+                        )}
+                      </Link>
+                    </td>
+                    <td className="px-4 py-3 font-mono">{fw.type.toUpperCase()}</td>
+                    <td className="px-4 py-3 font-mono text-xs">{fw.management_ip}</td>
+                    <td className="px-4 py-3">
+                      {fw.belong_region ? (
+                        <Badge variant="outline">{fw.belong_region}</Badge>
+                      ) : (
+                        <span className="text-gray-400 text-xs">未设</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      {fw.is_zone_boundary === 1 ? (
+                        <Badge className="bg-orange-500">是</Badge>
+                      ) : (
+                        <span className="text-gray-400 text-xs">否</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      <Link
+                        to={`/firewalls/${fw.id}/zones`}
+                        className="inline-flex items-center gap-1 text-blue-600 hover:underline"
+                      >
+                        {fw.zones_count}
+                        <ExternalLink className="w-3 h-3" />
+                      </Link>
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      <Link
+                        to={`/firewalls/${fw.id}/access`}
+                        className="inline-flex items-center gap-1 text-orange-600 hover:underline"
+                      >
+                        {fw.access_configs_count}
+                        <ExternalLink className="w-3 h-3" />
+                      </Link>
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      {fw.status === 'enabled' ? (
+                        <Badge>启用</Badge>
+                      ) : (
+                        <Badge variant="outline">禁用</Badge>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <Link to={`/firewalls/${fw.id}/edit`}>
+                        <Button variant="outline" size="sm">
+                          <Edit className="w-3 h-3" />
+                        </Button>
+                      </Link>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="ml-2 text-red-600"
+                        onClick={() => handleDelete(fw)}
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
 
-                  {fw.protected_ips && (
-                    <details className="text-sm">
-                      <summary className="cursor-pointer text-blue-600 hover:text-blue-800">
-                        查看防护IP段 ({fw.protected_ips.split('\n').filter(Boolean).length}个)
-                      </summary>
-                      <pre className="mt-2 p-3 bg-gray-50 rounded text-xs overflow-auto max-h-40">
-                        {fw.protected_ips}
-                      </pre>
-                    </details>
-                  )}
-                </div>
-
-                <div className="flex gap-2 ml-4">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => navigate(`/firewalls/${fw.id}/edit`)}
-                  >
-                    编辑
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="destructive"
-                    onClick={() => handleDelete(fw.id)}
-                  >
-                    删除
-                  </Button>
-                </div>
-              </div>
-            </Card>
-          ))}
-        </div>
-      )}
+      <Card className="p-4 mt-4 bg-blue-50 border-blue-200">
+        <h3 className="text-sm font-semibold mb-1">💡 新设计要点</h3>
+        <ul className="text-xs text-gray-700 space-y-1">
+          <li>• <b>安全域</b> 和 <b>跨区配置</b> 不再是防火墙的 inline 字段, 改为独立子页面管理</li>
+          <li>• 点表格里的 <Layers className="inline w-3 h-3" /> 列数字跳到该防火墙的安全域列表</li>
+          <li>• 点 <Network className="inline w-3 h-3" /> 列数字跳到该防火墙的跨区配置列表</li>
+          <li>• 点名称跳到详情页 (基本信息 + 子页面入口)</li>
+        </ul>
+      </Card>
     </div>
   );
 }
