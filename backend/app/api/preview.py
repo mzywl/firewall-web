@@ -88,13 +88,10 @@ def get_preview_data(order_id: int, db: Session = Depends(get_db)):
                 "alias": group["firewall"].alias,
                 "type": group["firewall"].type,
                 "management_ip": group["firewall"].management_ip,
-                "region": group["firewall"].region,
-                "covered_region": group["firewall"].covered_region,
-                "local_zone_name": group["firewall"].local_zone_name,
-                "external_zone_name": group["firewall"].external_zone_name,
+                # 新设计 (2026-06-22): covered_region/local_zone_name/external_zone_name/push_contact 已删除
+                "belong_region": group["firewall"].belong_region,
                 "is_zone_boundary": group["firewall"].is_zone_boundary,
                 "auto_push": group["firewall"].auto_push,
-                "push_contact": group["firewall"].push_contact,
             },
             "policies": group["policies"],
         }

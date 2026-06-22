@@ -1,9 +1,12 @@
 """
-区域访问配置API（SNAT-only 版本）
+区域访问配置 API — 对齐 重构.md §1 新设计
 
-项目决定: 取消 DNAT 分析, ZoneAccessConfig 不再携带 nat_type 字段。
-本 API 仅维护"源区域 → 目的区域 → 防火墙"的关系, 跨区域访问
-默认按 SNAT 处理（由 NATAnalyzer 判定）。
+新设计 (2026-06-22):
+  - ZoneAccessConfig.source_zone → source_region
+  - ZoneAccessConfig.dest_zone → dest_region
+  - 新增 boundary_source_zone / boundary_dest_zone / need_nat / snat_pool (4 字段)
+  - Firewall.region → belong_region
+  - Firewall 不再有 local_zone_name / external_zone_name
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -17,22 +20,25 @@ router = APIRouter(prefix="/api/zone-access", tags=["zone-access"])
 
 
 class ZoneAccessConfigBase(BaseModel):
-    """区域访问配置基础模型（已移除 nat_type 字段）"""
-    source_zone: str
-    dest_zone: str
+    """区域访问配置基础模型 (对齐 spec 4 字段)"""
+    source_region: str
+    dest_region: str
     firewall_id: int
+    boundary_source_zone: str
+    boundary_dest_zone: str
+    need_nat: int = 0
+    snat_pool: str = None
+    description: str = None
 
 
 class ZoneAccessConfigCreate(ZoneAccessConfigBase):
-    """创建区域访问配置（已移除 nat_type 字段）"""
+    """创建区域访问配置"""
     pass
 
 
 @router.get("/firewalls")
 def get_firewalls(db: Session = Depends(get_db)):
-    """
-    获取所有防火墙列表（用于下拉选择）
-    """
+    """获取所有防火墙列表 (用于下拉选择)"""
     firewalls = db.query(Firewall).filter(Firewall.is_active == 1).all()
 
     return {
@@ -42,8 +48,8 @@ def get_firewalls(db: Session = Depends(get_db)):
                 "name": fw.name,
                 "alias": fw.alias,
                 "type": fw.type,
-                "region": fw.region,
-                "zones": _extract_zones(fw)
+                "belong_region": fw.belong_region,
+                "zones": _extract_zones(fw),
             }
             for fw in firewalls
         ]
@@ -52,32 +58,25 @@ def get_firewalls(db: Session = Depends(get_db)):
 
 @router.post("/analyze")
 def analyze_zone_access(
-    source_zone: str,
-    dest_zone: str,
-    db: Session = Depends(get_db)
+    source_region: str,
+    dest_region: str,
+    db: Session = Depends(get_db),
 ):
     """
     分析区域访问场景
-
-    根据源区域和目的区域，判断：
-    1. 是否同区域（同一个防火墙的同一个区域）
-    2. 推荐的防火墙
-    3. 是否需要 NAT（跨区域默认按 SNAT 处理）
     """
     firewalls = db.query(Firewall).filter(Firewall.is_active == 1).all()
 
-    # 查找包含源区域的防火墙
+    # 找含 source_region 的防火墙 (通过 belong_region 或 firewall.zones[].connect_region)
     source_firewalls = []
     for fw in firewalls:
-        zones = _extract_zones(fw)
-        if source_zone in zones:
+        if _firewall_in_region(fw, source_region):
             source_firewalls.append(fw)
 
-    # 查找包含目的区域的防火墙
+    # 找含 dest_region 的防火墙
     dest_firewalls = []
     for fw in firewalls:
-        zones = _extract_zones(fw)
-        if dest_zone in zones:
+        if _firewall_in_region(fw, dest_region):
             dest_firewalls.append(fw)
 
     # 判断是否同区域
@@ -88,7 +87,7 @@ def analyze_zone_access(
     # 检查是否在同一个防火墙的同一个区域
     for src_fw in source_firewalls:
         for dst_fw in dest_firewalls:
-            if src_fw.id == dst_fw.id and source_zone == dest_zone:
+            if src_fw.id == dst_fw.id and source_region == dest_region:
                 is_same_zone = True
                 recommended_firewall = src_fw
                 need_nat = False
@@ -96,71 +95,72 @@ def analyze_zone_access(
         if is_same_zone:
             break
 
-    # 如果不是同区域，判断是否跨区域
+    # 如果不是同区域, 判断是否跨区域
     if not is_same_zone:
-        # 检查是否在同一个防火墙的不同区域
         for src_fw in source_firewalls:
             for dst_fw in dest_firewalls:
                 if src_fw.id == dst_fw.id:
                     recommended_firewall = src_fw
-                    need_nat = True  # 跨区域默认 SNAT（项目已取消 DNAT 分析）
+                    need_nat = True  # 跨区域默认 SNAT
                     break
             if recommended_firewall:
                 break
 
-        # 如果不在同一个防火墙，推荐源防火墙
         if not recommended_firewall and source_firewalls:
             recommended_firewall = source_firewalls[0]
             need_nat = True  # 跨防火墙 = 跨区域
 
+    # 找 cfg (按 boundary_* zones 匹配) 用于取 SNAT 池
+    snat_pool = None
+    if recommended_firewall:
+        for cfg in (recommended_firewall.zone_access_configs or []):
+            if cfg.source_region == source_region and cfg.dest_region == dest_region:
+                snat_pool = cfg.snat_pool
+                break
+
     return {
-        "source_zone": source_zone,
-        "dest_zone": dest_zone,
+        "source_region": source_region,
+        "dest_region": dest_region,
         "is_same_zone": is_same_zone,
         "need_nat": need_nat,
-        # 项目已取消 DNAT 分析, 不再返回 nat_type 字段
+        "snat_pool": snat_pool,
         "recommended_firewall": {
             "id": recommended_firewall.id,
             "name": recommended_firewall.name,
             "alias": recommended_firewall.alias,
-            "region": recommended_firewall.region
+            "belong_region": recommended_firewall.belong_region,
         } if recommended_firewall else None,
         "source_firewalls": [
-            {
-                "id": fw.id,
-                "name": fw.name,
-                "alias": fw.alias
-            }
+            {"id": fw.id, "name": fw.name, "alias": fw.alias}
             for fw in source_firewalls
         ],
         "dest_firewalls": [
-            {
-                "id": fw.id,
-                "name": fw.name,
-                "alias": fw.alias
-            }
+            {"id": fw.id, "name": fw.name, "alias": fw.alias}
             for fw in dest_firewalls
-        ]
+        ],
     }
 
 
 @router.post("/save")
 def save_zone_access_config(
     config: ZoneAccessConfigCreate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-    """
-    保存区域访问配置（已移除 nat_type 字段）
-    """
-    # 检查是否已存在相同配置
+    """保存区域访问配置 (对齐 spec 4 字段)"""
+    # 检查是否已存在相同配置 (按 source_region + dest_region + firewall_id)
     existing = db.query(ZoneAccessConfig).filter(
-        ZoneAccessConfig.source_zone == config.source_zone,
-        ZoneAccessConfig.dest_zone == config.dest_zone,
-        ZoneAccessConfig.firewall_id == config.firewall_id
+        ZoneAccessConfig.source_region == config.source_region,
+        ZoneAccessConfig.dest_region == config.dest_region,
+        ZoneAccessConfig.firewall_id == config.firewall_id,
     ).first()
 
     if existing:
-        # 更新现有配置（仅更新 updated_at）
+        # 更新现有配置
+        existing.boundary_source_zone = config.boundary_source_zone
+        existing.boundary_dest_zone = config.boundary_dest_zone
+        existing.need_nat = config.need_nat
+        existing.snat_pool = config.snat_pool
+        existing.description = config.description
         existing.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(existing)
@@ -169,19 +169,28 @@ def save_zone_access_config(
             "message": "配置已更新",
             "config": {
                 "id": existing.id,
-                "source_zone": existing.source_zone,
-                "dest_zone": existing.dest_zone,
+                "source_region": existing.source_region,
+                "dest_region": existing.dest_region,
+                "boundary_source_zone": existing.boundary_source_zone,
+                "boundary_dest_zone": existing.boundary_dest_zone,
+                "need_nat": existing.need_nat,
+                "snat_pool": existing.snat_pool,
                 "firewall_id": existing.firewall_id,
                 "created_at": existing.created_at.isoformat(),
-                "updated_at": existing.updated_at.isoformat()
-            }
+                "updated_at": existing.updated_at.isoformat(),
+            },
         }
     else:
         # 创建新配置
         new_config = ZoneAccessConfig(
-            source_zone=config.source_zone,
-            dest_zone=config.dest_zone,
-            firewall_id=config.firewall_id
+            source_region=config.source_region,
+            dest_region=config.dest_region,
+            boundary_source_zone=config.boundary_source_zone,
+            boundary_dest_zone=config.boundary_dest_zone,
+            need_nat=config.need_nat,
+            snat_pool=config.snat_pool,
+            description=config.description,
+            firewall_id=config.firewall_id,
         )
         db.add(new_config)
         db.commit()
@@ -191,32 +200,38 @@ def save_zone_access_config(
             "message": "配置已保存",
             "config": {
                 "id": new_config.id,
-                "source_zone": new_config.source_zone,
-                "dest_zone": new_config.dest_zone,
+                "source_region": new_config.source_region,
+                "dest_region": new_config.dest_region,
+                "boundary_source_zone": new_config.boundary_source_zone,
+                "boundary_dest_zone": new_config.boundary_dest_zone,
+                "need_nat": new_config.need_nat,
+                "snat_pool": new_config.snat_pool,
                 "firewall_id": new_config.firewall_id,
                 "created_at": new_config.created_at.isoformat(),
-                "updated_at": new_config.updated_at.isoformat()
-            }
+                "updated_at": new_config.updated_at.isoformat(),
+            },
         }
 
 
 @router.get("/configs")
 def list_zone_access_configs(db: Session = Depends(get_db)):
-    """
-    获取所有区域访问配置（已移除 nat_type 字段）
-    """
+    """获取所有区域访问配置 (对齐 spec)"""
     configs = db.query(ZoneAccessConfig).all()
 
     return {
         "configs": [
             {
                 "id": cfg.id,
-                "source_zone": cfg.source_zone,
-                "dest_zone": cfg.dest_zone,
+                "source_region": cfg.source_region,
+                "dest_region": cfg.dest_region,
+                "boundary_source_zone": cfg.boundary_source_zone,
+                "boundary_dest_zone": cfg.boundary_dest_zone,
+                "need_nat": cfg.need_nat,
+                "snat_pool": cfg.snat_pool,
                 "firewall_id": cfg.firewall_id,
                 "firewall_name": cfg.firewall.name if cfg.firewall else None,
                 "created_at": cfg.created_at.isoformat(),
-                "updated_at": cfg.updated_at.isoformat()
+                "updated_at": cfg.updated_at.isoformat(),
             }
             for cfg in configs
         ]
@@ -225,9 +240,7 @@ def list_zone_access_configs(db: Session = Depends(get_db)):
 
 @router.delete("/configs/{config_id}")
 def delete_zone_access_config(config_id: int, db: Session = Depends(get_db)):
-    """
-    删除区域访问配置
-    """
+    """删除区域访问配置"""
     config = db.query(ZoneAccessConfig).filter(ZoneAccessConfig.id == config_id).first()
 
     if not config:
@@ -239,38 +252,34 @@ def delete_zone_access_config(config_id: int, db: Session = Depends(get_db)):
     return {"message": "配置已删除"}
 
 
-def _extract_zones(firewall: Firewall) -> List[str]:
-    """
-    从防火墙配置中提取区域列表
+def _firewall_in_region(fw: Firewall, region: str) -> bool:
+    """判断 firewall 是否覆盖 region
 
-    综合考虑：
-    1. region（地理/数据中心区域）
-    2. local_zone_name（本地防护区域，如 trust）
-    3. external_zone_name（外部防护区域，如 untrust）
-    4. firewall_zones 表中的显式配置（如有）
+    判定路径:
+      1. fw.belong_region == region
+      2. fw.zones 中某 zone.connect_region == region
     """
+    if fw.belong_region == region:
+        return True
+    for zone in (fw.zones or []):
+        if zone.connect_region == region:
+            return True
+    return False
+
+
+def _extract_zones(fw: Firewall) -> List[str]:
+    """从防火墙配置提取 zone 列表 (新设计: 不用 local/external_zone_name)"""
     zones = []
 
-    # 1) region
-    if firewall.region:
-        zones.append(firewall.region)
+    # 1) belong_region
+    if fw.belong_region:
+        zones.append(fw.belong_region)
 
-    # 2) 本地/外部 zone 名称
-    if firewall.local_zone_name:
-        zones.append(firewall.local_zone_name)
-    if firewall.external_zone_name:
-        zones.append(firewall.external_zone_name)
-
-    # 3) firewall_zones 表（feature 引入的显式 zone 配置）
-    try:
-        from app.models import FirewallZone
-        explicit_zones = [
-            z.zone_name for z in firewall.zones
-            if z.zone_name and z.zone_name not in zones
-        ]
-        zones.extend(explicit_zones)
-    except Exception:
-        # 没有 zones 关系或查询失败时忽略
-        pass
+    # 2) firewall_zones 表 (zone_name + connect_region)
+    for z in (fw.zones or []):
+        if z.zone_name and z.zone_name not in zones:
+            zones.append(z.zone_name)
+        if z.connect_region and z.connect_region not in zones:
+            zones.append(z.connect_region)
 
     return zones

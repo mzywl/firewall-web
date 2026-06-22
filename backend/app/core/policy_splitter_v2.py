@@ -65,9 +65,9 @@ class PolicySplitterV2:
                         }
 
                         # 基于墙体属性执行策略安全拦截拦截
+                        # 新设计 (2026-06-22): allow_same_firewall_push 字段已删除, 同墙默认允许
                         if direction == 'same_firewall':
-                            if not getattr(firewall, 'allow_same_firewall_push', 0):
-                                policy_item['not_pushed_reason'] = '源目的IP均在同一防火墙内部，未启用同墙推送'
+                            pass  # 同墙策略不再受字段开关限制
                         elif direction == 'cross_internal':
                             policy_item['not_pushed_reason'] = f'源IP在{firewall.name}内部，目的IP在其他防火墙内部，跨防火墙内部通信不推送'
 
@@ -98,10 +98,12 @@ class PolicySplitterV2:
         dest_matches = []
 
         for fw in self.firewalls:
-            src_internal = self._ip_in_range(source_ip, fw.internal_protected_ips)
-            src_external = self._ip_in_range(source_ip, fw.external_protected_ips)
-            dst_internal = self._ip_in_range(dest_ip, fw.internal_protected_ips)
-            dst_external = self._ip_in_range(dest_ip, fw.external_protected_ips)
+            # 新设计: 用 FirewallZone.protected_ips 替代旧的 internal/external_protected_ips
+            # internal 判定: zone.connect_region == fw.belong_region
+            src_internal = self._ip_in_internal_zones(source_ip, fw)
+            src_external = self._ip_in_external_zones(source_ip, fw)
+            dst_internal = self._ip_in_internal_zones(dest_ip, fw)
+            dst_external = self._ip_in_external_zones(dest_ip, fw)
 
             if src_internal or src_external:
                 source_matches.append((fw, src_internal))
@@ -126,7 +128,7 @@ class PolicySplitterV2:
         for src_fw, src_internal in source_matches:
             if src_internal:
                 for dst_fw, dst_internal in dest_matches:
-                    if dst_internal and src_fw.id != dst_fw.id and getattr(src_fw, 'region', '') == getattr(dst_fw, 'region', 'default'):
+                    if dst_internal and src_fw.id != dst_fw.id and getattr(src_fw, 'belong_region', '') == getattr(dst_fw, 'belong_region', 'default'):
                         result.append((src_fw, 'cross_internal'))
                         return result  # 拦截阻断
 
@@ -160,6 +162,38 @@ class PolicySplitterV2:
             return False
         except:
             return False
+
+    def _ip_in_internal_zones(self, ip_str: str, fw: Firewall) -> bool:
+        """新设计: IP 落在 firewall 内部 zones (zone.connect_region == fw.belong_region)"""
+        if not fw.zones or not fw.belong_region:
+            return False
+        try:
+            ip = self._extract_first_ip(ip_str)
+            ip_obj = ipaddress.ip_address(ip)
+        except Exception:
+            return False
+        for zone in fw.zones:
+            if zone.connect_region != fw.belong_region:
+                continue
+            if zone.protected_ips and self._ip_in_range(ip_str, zone.protected_ips):
+                return True
+        return False
+
+    def _ip_in_external_zones(self, ip_str: str, fw: Firewall) -> bool:
+        """新设计: IP 落在 firewall 外部 zones (zone.connect_region != fw.belong_region)"""
+        if not fw.zones or not fw.belong_region:
+            return False
+        try:
+            ip = self._extract_first_ip(ip_str)
+            ip_obj = ipaddress.ip_address(ip)
+        except Exception:
+            return False
+        for zone in fw.zones:
+            if zone.connect_region == fw.belong_region:
+                continue
+            if zone.protected_ips and self._ip_in_range(ip_str, zone.protected_ips):
+                return True
+        return False
 
     def _extract_first_ip(self, ip_str: str) -> str:
         if not ip_str: return ""
