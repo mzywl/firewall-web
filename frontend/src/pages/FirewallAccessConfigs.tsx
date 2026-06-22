@@ -140,7 +140,10 @@ export default function FirewallAccessConfigs() {
     e.preventDefault();
     try {
       if (editingCfg) {
-        await axios.put(`${API_BASE_URL}/zone-access/configs/${editingCfg.id}`, formData);
+        await axios.put(`${API_BASE_URL}/zone-access/configs/${editingCfg.id}`, {
+          ...formData,
+          firewall_id: firewallId,  // 后端 ZoneAccessConfigCreate 必填, 跟 POST /save 对齐
+        });
         toast.success('跨区配置已更新');
       } else {
         await axios.post(`${API_BASE_URL}/zone-access/save`, {
