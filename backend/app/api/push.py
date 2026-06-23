@@ -120,12 +120,15 @@ def test_connection(firewall_id: int, db: Session = Depends(get_db)):
             status_code=400,
             detail="防火墙连接配置缺 username/password（请在编辑防火墙页面配置）",
         )
+    # 解密密码 (firewalls.py 存的是 base64 加密)
+    from app.api.firewalls import decrypt_password
+    ssh_pass = decrypt_password(cfg.get("password", ""))
     try:
         client = create_client(
             device_type=fw.type.value if hasattr(fw.type, "value") else str(fw.type),
             host=fw.management_ip,
             username=cfg.get("username", ""),
-            password=cfg.get("password", ""),
+            password=ssh_pass,
             port=cfg.get("port", 22),
             timeout=cfg.get("timeout", 30),
         )
@@ -507,11 +510,31 @@ def generate_push_script(
     fetch_error: Optional[str] = None
     if fetch_device_config:
         try:
-            # 这里假定 SSH 凭据在 fw 上有 (生产环境会从 fw 关联的 Connection 实体读)
-            # 当前 backend 还没接凭据持久化, 暂时从环境变量取或用空 (会连不上, fallback)
-            import os
-            ssh_user = os.environ.get("H3C_DEFAULT_SSH_USER", "")
-            ssh_pass = os.environ.get("H3C_DEFAULT_SSH_PASS", "")
+            # 从 Firewall.connection_config 读 SSH 凭据 (跟 test_connection 一致)
+            # firewalls.py 创建/更新时 password 已 encrypt, 这里要 decrypt
+            cfg = fw.connection_config or {}
+            ssh_user = cfg.get("username", "")
+            ssh_pass_enc = cfg.get("password", "")
+            if ssh_pass_enc:
+                from app.api.firewalls import decrypt_password
+                ssh_pass = decrypt_password(ssh_pass_enc)
+            else:
+                ssh_pass = ""
+            ssh_port = cfg.get("port", 22)
+            if not ssh_user or not ssh_pass:
+                raise ValueError(
+                    f"防火墙 {fw.id} ({fw.name}) 未配置 SSH 凭据 "
+                    f"(connection_config 缺 username/password), 无法深度分析"
+                )
+            # 重新建 client (之前那个是空凭据不能用)
+            client = create_client(
+                device_type=fw_type,
+                host=fw.management_ip,
+                username=ssh_user,
+                password=ssh_pass,
+                port=ssh_port,
+                timeout=cfg.get("timeout", 30),
+            )
             config_text = client.fetch_running_config()
             addresses, services, policies = client.parse_config(config_text)
             fw_cache = h3c_policies_to_fw_cache(addresses, services, policies)
