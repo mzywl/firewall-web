@@ -175,6 +175,12 @@ export const updatePolicies = async (orderId: number, policies: Policy[]): Promi
   return data;
 };
 
+// 删除单条策略 (C2 后端 DELETE /api/orders/{id}/policies/{pid} 端点, status 204)
+// 用途: preview 页直接删除用户不想要的策略, 同时清理 user_modified 快照
+export const deletePolicy = async (orderId: number, policyId: number): Promise<void> => {
+  await api.delete(`/api/orders/${orderId}/policies/${policyId}`);
+};
+
 // 开始推送
 export const startPush = async (orderId: number): Promise<{ message: string; task_id: string; order_id: number; policies_count: number }> => {
   const { data } = await api.post(`/api/push/orders/${orderId}/start`);

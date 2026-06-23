@@ -1,16 +1,19 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, AlertTriangle, FileCode, ChevronDown, ChevronRight } from 'lucide-react';
+import { ArrowLeft, AlertTriangle, FileCode, ChevronDown, ChevronRight, Send } from 'lucide-react';
 import { Button } from '../components/ui/Button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../components/ui/Card';
 import { UnmatchedPoliciesTable } from '../components/preview/UnmatchedPoliciesTable';
 import { FirewallPolicyTable } from '../components/preview/FirewallPolicyTable';
 import { PushScriptModal } from '../components/preview/PushScriptModal';
+import { Badge } from '../components/ui/Badge';
+import { deletePolicy } from '../lib/api';
 import { toast } from '../lib/toast';
 import type {
   FirewallGroup,
   PreviewData,
   PreviewFirewall,
+  PreviewPolicy,
 } from '../types';
 
 // 注: 旧的 NATInfo / NATPolicy / Policy / Firewall / FirewallGroup / PreviewData
@@ -62,6 +65,27 @@ export const Preview = () => {
       ...prev,
       [firewallId]: !prev[firewallId]
     }));
+  };
+
+  // C4: 删除单条策略 (调 DELETE /api/orders/{id}/policies/{pid})
+  // 同时清理 user_modified 快照 (C2 后端用 flag_modified 同步)
+  // 删完重新拉 preview, 让用户看到最新推送结果
+  // toast.confirm 是 fire-and-forget: 传 onConfirm 回调, 取消不触发
+  const handleDeletePolicy = (policy: PreviewPolicy) => {
+    if (!orderId) return;
+    toast.confirm('确定删除该策略吗?删除后需要重新生成推送脚本。', {
+      confirmText: '确认删除',
+      onConfirm: async () => {
+        try {
+          await deletePolicy(Number(orderId), policy.id);
+          toast.success('策略已删除');
+          // 重新拉 preview 数据
+          await loadPreviewData();
+        } catch (error) {
+          toast.apiError(error, '删除策略失败');
+        }
+      },
+    });
   };
 
   const handleNext = () => {
@@ -182,6 +206,17 @@ export const Preview = () => {
                   {group.firewall.alias && (
                     <span className="text-sm text-muted-foreground ml-2">({group.firewall.alias})</span>
                   )}
+                  {/* C4: 边界墙标识 (is_zone_boundary=1) - 只在这台墙上推策略 */}
+                  {group.firewall.is_zone_boundary === 1 && (
+                    <Badge
+                      className="ml-3 bg-emerald-500 hover:bg-emerald-600 text-white"
+                      data-testid={`boundary-badge-${group.firewall.id}`}
+                      title="该防火墙是区域边界防火墙, 实际推送策略会落到此墙"
+                    >
+                      <Send className="h-3 w-3 mr-1" />
+                      将在此墙推送
+                    </Badge>
+                  )}
                 </CardTitle>
                 <CardDescription className="mt-1">
                   类型: {group.firewall.type} | 管理IP: {group.firewall.management_ip} | 
@@ -215,8 +250,8 @@ export const Preview = () => {
               共 {group.policies.length} 条策略
             </div>
 
-            {/* 策略表格 (原始 + SNAT/PASS_THROUGH + warnings) */}
-            <FirewallPolicyTable group={group} />
+            {/* 策略表格 (原始 + SNAT/PASS_THROUGH + warnings + 删除按钮) */}
+            <FirewallPolicyTable group={group} onDeletePolicy={handleDeletePolicy} />
           </CardContent>
         </Card>
       ))}

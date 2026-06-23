@@ -1,7 +1,7 @@
 // FirewallPolicyTable 组件测试 - 验证关键渲染场景
 // 这个组件最容易碎: 字段名错一列 / source_zone_name vs source_zone 用错 / PASS_THROUGH 渲染漏
-import { describe, it, expect } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { describe, it, expect, vi } from 'vitest'
+import { render, screen, fireEvent } from '@testing-library/react'
 import { FirewallPolicyTable } from './FirewallPolicyTable'
 import type { FirewallGroup, PreviewPolicy, NATPolicy, NATInfo } from '../../types'
 
@@ -58,7 +58,7 @@ describe('FirewallPolicyTable', () => {
     expect(screen.getByText('10.1.1.1')).toBeInTheDocument()
     expect(screen.getByText('10.2.2.2')).toBeInTheDocument()
     expect(screen.getByText('443')).toBeInTheDocument()
-    expect(screen.getByText('permit')).toBeInTheDocument()
+    // C4: 动作列已删, 不再测 'permit' 单元格; action 字段仍存在但不在表里
   })
 
   it('prefers source_zone_name (业务名) over source_zone (程序值)', () => {
@@ -207,5 +207,26 @@ describe('FirewallPolicyTable', () => {
     )
     // 表格里有 NBSP, 而不是真的空字符串
     expect(container.textContent).toContain('\u00A0')
+  })
+
+  it('C4: 渲染删除按钮当 onDeletePolicy 传入', () => {
+    const onDelete = vi.fn()
+    const policy = makePolicy({ id: 42 })
+    render(
+      <FirewallPolicyTable
+        group={makeGroup({ policies: [policy] })}
+        onDeletePolicy={onDelete}
+      />
+    )
+    const btn = screen.getByTestId('delete-policy-42')
+    expect(btn).toBeInTheDocument()
+    fireEvent.click(btn)
+    expect(onDelete).toHaveBeenCalledWith(policy)
+  })
+
+  it('C4: 不渲染删除按钮当 onDeletePolicy 缺省 (只读模式)', () => {
+    const policy = makePolicy({ id: 99 })
+    render(<FirewallPolicyTable group={makeGroup({ policies: [policy] })} />)
+    expect(screen.queryByTestId('delete-policy-99')).not.toBeInTheDocument()
   })
 })
