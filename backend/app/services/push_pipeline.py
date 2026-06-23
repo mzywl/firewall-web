@@ -172,8 +172,8 @@ class PushPipeline:
                     valid_until=valid_until,
                     rule_name=f"O{order.order_no}-P{p.id}",
                     policy_id=p.id,
-                    src_zone=p.source_zone or "any",
-                    dst_zone=p.dest_zone or "any",
+                    src_zone=p.device_source_zone or "any",  # spec §1 字段重命名
+                    dst_zone=p.device_dest_zone or "any",  # spec §1 字段重命名
                 )
                 self.match_results.append(result)
                 self._emit("matched", f"策略 P{p.id} → {result.action.value}", {
@@ -415,9 +415,9 @@ class PushPipeline:
                 "dst_ips": dst_ips,
                 "ports": ports,
                 "valid_until": self._extract_valid_until(p),
-                "src_zone": p.source_zone or "any",
-                "dst_zone": p.dest_zone or "any",
-                "action": p.action or "permit",
+                "src_zone": p.device_source_zone or "any",  # spec §1 字段重命名
+                "dst_zone": p.device_dest_zone or "any",  # spec §1 字段重命名
+                "action": "permit",  # spec §1 删了 Policy.action, 固定 permit (对齐 chain_planner.py:202)
             })
         return out
 
