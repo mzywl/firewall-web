@@ -39,7 +39,7 @@ api.interceptors.response.use(
 // v2 推送相关类型
 // ============================================================
 
-export type PushMode = 'deduplicate' | 'force_push';
+export type PushMode = 'deduplicate' | 'force_push' | 'reuse_objects';
 
 export interface PushV2Result {
   success: boolean;

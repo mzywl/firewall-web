@@ -226,7 +226,7 @@ export const Push = () => {
                   <Hash className="h-4 w-4" />
                   推送模式
                 </label>
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
                   <button
                     type="button"
                     onClick={() => setMode('deduplicate')}
@@ -252,7 +252,21 @@ export const Push = () => {
                   >
                     <div className="font-medium">全推模式</div>
                     <div className="text-xs text-muted-foreground mt-1">
-                      对象复用，整条策略必新建（强制落盘）
+                      对象与策略全错开新建（强制落盘）
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMode('reuse_objects')}
+                    className={`p-3 rounded-md border text-left text-sm transition-colors ${
+                      mode === 'reuse_objects'
+                        ? 'border-primary bg-primary/5 ring-1 ring-primary'
+                        : 'border-input hover:bg-accent'
+                    }`}
+                  >
+                    <div className="font-medium">对象复用模式</div>
+                    <div className="text-xs text-muted-foreground mt-1">
+                      复用相同 IP/端口组，策略行新建
                     </div>
                   </button>
                 </div>
