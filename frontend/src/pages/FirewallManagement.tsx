@@ -4,11 +4,13 @@
  * 设计对应 重构.md §1 spec:
  *   - 字段: name, alias, type, management_ip, belong_region (was region), connection_type,
  *           is_zone_boundary, auto_push, status, is_active
- *   - 删字段: covered_region, local_zone_name, external_zone_name, internal_protected_ips,
+ *   - 删字段 (历史): covered_region, local_zone_name, external_zone_name, internal_protected_ips,
  *             external_protected_ips, outbound_snat_pool, inbound_snat_pool,
  *             allow_same_firewall_push, push_contact, push_remark, supported_policy_types, remark
  *
- * 新增列: zones 计数 + access configs 计数 (跳到详情页 / 子页)
+ * 计数列 (C5 改造):
+ *   - 安全域: 调 GET /api/firewall-zones/all 聚合端点 (替代之前的 N+1)
+ *   - 跨区配置: 调 GET /api/zone-access/configs 全量 + 前端 forEach
  */
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
@@ -60,16 +62,19 @@ export default function FirewallManagement() {
 
       const [fwRes, zonesRes, cfgRes] = await Promise.all([
         axios.get(`${API_BASE_URL}/firewalls?${params.toString()}`),
-        axios.get(`${API_BASE_URL}/firewall-zones/firewall/0`).catch(() => ({ data: { zones: [] } })),
+        // C5: 改用 /firewall-zones/all 聚合端点 (C2 后端加的), 替代 /firewall/0 拉全表 + 前端 forEach
+        // - 后端: SELECT firewall_id, COUNT(*) GROUP BY firewall_id, 一次返回 {firewall_id, zone_count}[]
+        // - 前端: 直接 O(1) hashmap 查, 不用再 forEach 计数
+        axios.get(`${API_BASE_URL}/firewall-zones/all`).catch(() => ({ data: { firewall_zones: [] } })),
         axios.get(`${API_BASE_URL}/zone-access/configs`).catch(() => ({ data: { configs: [] } })),
       ]);
 
       const firewallList: Firewall[] = Array.isArray(fwRes.data) ? fwRes.data : [];
 
-      // 统计 zones 计数 (按 firewall_id 分组)
+      // 统计 zones 计数 (直接 hashmap, 不用 forEach)
       const zonesCountByFw: Record<number, number> = {};
-      (zonesRes.data.zones || []).forEach((z: any) => {
-        zonesCountByFw[z.firewall_id] = (zonesCountByFw[z.firewall_id] || 0) + 1;
+      (zonesRes.data.firewall_zones || []).forEach((z: { firewall_id: number; zone_count: number }) => {
+        zonesCountByFw[z.firewall_id] = z.zone_count;
       });
 
       // 统计 access configs 计数
