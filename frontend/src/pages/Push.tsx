@@ -497,19 +497,20 @@ const FirewallPushCard = ({ orderId, group, mode }: FirewallPushCardProps) => {
             )}
             {scriptData && (
               <>
-                {/* 拉配状态提示 */}
+                {/* 拉配状态提示 / 错误诊断 (deep 模式专属) */}
                 {fetchMode === 'deep' && (
-                  <div
-                    className={`text-xs px-2 py-1 rounded ${
-                      scriptData.device_config_fetched
-                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                        : 'bg-yellow-50 text-yellow-700 border border-yellow-200'
-                    }`}
-                  >
-                    {scriptData.device_config_fetched
-                      ? '✓ 已连墙拉取真实配置, 6 要素分析基于设备现状'
-                      : `⚠ 连墙失败 (${scriptData.fetch_error || '未知错误'}), 所有策略 fallback 到 NEW_RULE`}
-                  </div>
+                  scriptData.device_config_fetched ? (
+                    <div className="text-xs px-3 py-2 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-2">
+                      <CheckCircle className="h-4 w-4 flex-shrink-0" />
+                      <span>已连墙拉取真实配置, 6 要素分析基于设备现状</span>
+                    </div>
+                  ) : (
+                    <DeepAnalysisError
+                      fetchError={scriptData.fetch_error}
+                      onSwitchToDryRun={() => handleLoadScript('dry_run')}
+                      onRetry={() => handleLoadScript('deep')}
+                    />
+                  )
                 )}
 
                 {/* 6 卡片统计: full_match / time_update / new_rule + skipped / commands / total */}
@@ -730,6 +731,127 @@ const MiniStat = ({
     <div className={`border rounded p-2 text-center ${bgColor}`}>
       <div className="text-xs text-muted-foreground">{label}</div>
       <div className={`text-xl font-bold ${textColor}`}>{value}</div>
+    </div>
+  );
+};
+
+// =============================================================
+// DeepAnalysisError - 深度分析错误诊断 + 操作建议
+// =============================================================
+
+interface DeepAnalysisErrorProps {
+  fetchError: string | null | undefined;
+  onSwitchToDryRun: () => void;
+  onRetry: () => void;
+}
+
+interface ErrorDiagnosis {
+  kind: 'no_credentials' | 'ssh_timeout' | 'ssh_failed' | 'parse_failed' | 'unknown';
+  title: string;
+  description: string;
+  /** 操作建议列表 (空数组 = 无建议) */
+  suggestions: { label: string; onClick: () => void; variant?: 'default' | 'outline' }[];
+}
+
+function diagnoseFetchError(msg: string | null | undefined, onSwitchToDryRun: () => void, onRetry: () => void): ErrorDiagnosis {
+  if (!msg) {
+    return {
+      kind: 'unknown',
+      title: '连墙分析失败',
+      description: '未知错误, 请重试或切到 dry-run',
+      suggestions: [
+        { label: '切换到 dry-run', onClick: onSwitchToDryRun, variant: 'outline' },
+        { label: '重试', onClick: onRetry },
+      ],
+    };
+  }
+  // 凭据缺失 (我 #2 commit 加的精准业务错)
+  if (msg.includes('未配置 SSH 凭据') || msg.includes('缺 username/password')) {
+    return {
+      kind: 'no_credentials',
+      title: '防火墙未配置 SSH 凭据',
+      description: '深度分析需要 SSH 连墙拉配置, 请先在防火墙编辑页面配 username / password / port',
+      suggestions: [
+        { label: '切换到 dry-run (不连设备)', onClick: onSwitchToDryRun, variant: 'outline' },
+        { label: '重试', onClick: onRetry, variant: 'outline' },
+      ],
+    };
+  }
+  // SSH timeout
+  if (msg.includes('timed out') || msg.includes('timeout')) {
+    return {
+      kind: 'ssh_timeout',
+      title: 'SSH 连接超时',
+      description: '防火墙 IP/端口不可达或防火墙没启 SSH, 请检查网络和管理 IP 配置',
+      suggestions: [
+        { label: '切换到 dry-run', onClick: onSwitchToDryRun, variant: 'outline' },
+        { label: '重试', onClick: onRetry },
+      ],
+    };
+  }
+  // SSH 一般错误 (认证失败 / 协议错误)
+  if (msg.toLowerCase().includes('ssh') || msg.toLowerCase().includes('认证') || msg.toLowerCase().includes('auth')) {
+    return {
+      kind: 'ssh_failed',
+      title: 'SSH 认证/连接失败',
+      description: '请检查 username / password / port 是否正确, 防火墙是否允许 SSH',
+      suggestions: [
+        { label: '切换到 dry-run', onClick: onSwitchToDryRun, variant: 'outline' },
+        { label: '重试', onClick: onRetry, variant: 'outline' },
+      ],
+    };
+  }
+  // 解析失败 (SSH 连上了但 parse_config 拿不到结构化数据)
+  if (msg.includes('parse') || msg.includes('解析')) {
+    return {
+      kind: 'parse_failed',
+      title: '设备配置解析失败',
+      description: 'SSH 连接 OK 但解析配置文本失败, 可能是设备型号不被支持或配置异常',
+      suggestions: [
+        { label: '切换到 dry-run', onClick: onSwitchToDryRun, variant: 'outline' },
+        { label: '重试', onClick: onRetry, variant: 'outline' },
+      ],
+    };
+  }
+  // 未知 (原文)
+  return {
+    kind: 'unknown',
+    title: '连墙分析失败',
+    description: msg,
+    suggestions: [
+      { label: '切换到 dry-run', onClick: onSwitchToDryRun, variant: 'outline' },
+      { label: '重试', onClick: onRetry },
+    ],
+  };
+}
+
+const DeepAnalysisError = ({ fetchError, onSwitchToDryRun, onRetry }: DeepAnalysisErrorProps) => {
+  const diag = diagnoseFetchError(fetchError, onSwitchToDryRun, onRetry);
+  return (
+    <div className="text-sm px-3 py-2.5 rounded bg-yellow-50 text-yellow-800 border border-yellow-300 space-y-1.5">
+      <div className="flex items-start gap-2">
+        <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+        <div className="flex-1 min-w-0">
+          <div className="font-semibold">{diag.title}</div>
+          <div className="text-xs text-yellow-700 mt-0.5">{diag.description}</div>
+        </div>
+      </div>
+      <div className="text-xs text-yellow-700 font-mono bg-yellow-100 px-2 py-1 rounded break-all">
+        错误: {fetchError || '(无详细信息)'}
+      </div>
+      <div className="flex items-center gap-2 flex-wrap pt-1">
+        {diag.suggestions.map((s, i) => (
+          <Button
+            key={i}
+            variant={s.variant || 'default'}
+            size="sm"
+            onClick={s.onClick}
+            data-testid={`deep-error-${diag.kind}-action-${i}`}
+          >
+            {s.label}
+          </Button>
+        ))}
+      </div>
     </div>
   );
 };
