@@ -1,387 +1,653 @@
+/**
+ * Push 页面 (C7 redesign)
+ *
+ * 数据流:
+ *   1. 拉 /api/workorders/{orderId}/preview → firewall_groups
+ *   2. 按 firewall_groups 顺序渲染, 每面墙 1 个 Card
+ *   3. 每面墙 Card 折叠区: 调 generate-script 拉该墙命令预览 (按需, 默认折叠)
+ *   4. 每面墙独立 "推送到这面墙" 按钮 + 进度 + 实时日志
+ *
+ * 关键改动 vs 旧版 (C6 之前的 Push.tsx):
+ *   - 不再用 useFirewalls() 拿所有墙, 改用 preview.firewall_groups (前面过滤出来的墙)
+ *   - 每面墙独立推送, 3 模式 Radio 全局共享 (顶部 1 份)
+ *   - 不管哪个模式, 都展示 generate-script 命令预览 (按需 fetch)
+ */
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft,
   Play,
-  RotateCcw,
   CheckCircle,
-  Wifi,
+  XCircle,
   Server,
   Hash,
-  XCircle,
-  ExternalLink,
+  ChevronDown,
+  ChevronRight,
+  FileCode,
+  Copy,
+  Check,
   AlertCircle,
+  Send,
+  Loader2,
 } from 'lucide-react';
 import { Button } from '../components/ui/Button';
-import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../components/ui/Card';
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+  CardContent,
+} from '../components/ui/Card';
+import { Badge } from '../components/ui/Badge';
 import { PushProgressBar } from '../components/push/PushProgressBar';
 import { PushLogViewer } from '../components/push/PushLogViewer';
-import { useOrder, usePolicies } from '../hooks/useOrders';
 import {
   useStartPushV2,
   useSnapshot,
   useSnapshotLogs,
 } from '../hooks/usePush';
-import { useFirewalls, useTestConnection } from '../hooks/useFirewalls';
 import type { PushMode, PushLogsResponse } from '../lib/api';
 import { toast } from '../lib/toast';
+import type {
+  PreviewData,
+  FirewallGroup,
+  GenerateScriptResponse,
+} from '../types/preview';
 
 export const Push = () => {
   const { orderId } = useParams<{ orderId: string }>();
   const navigate = useNavigate();
+  const oid = Number(orderId);
 
-  const [firewallId, setFirewallId] = useState<number | null>(null);
+  // 全局推送模式 (3 模式 Radio, 共享给所有墙)
   const [mode, setMode] = useState<PushMode>('deduplicate');
-  const [snapshotId, setSnapshotId] = useState<number | null>(null);
-  const [isPushing, setIsPushing] = useState(false);
-  const [isCompleted, setIsCompleted] = useState(false);
-  const [testResult, setTestResult] = useState<{
-    ok: boolean;
-    message: string;
-  } | null>(null);
 
-  const { data: order } = useOrder(Number(orderId));
-  const { data: policies } = usePolicies(Number(orderId), 'user_modified');
-  const { data: firewalls, isLoading: loadingFws } = useFirewalls();
-  const startPushMutation = useStartPushV2(Number(orderId));
-  const testConnMutation = useTestConnection();
-  const { data: snapshot } = useSnapshot(snapshotId);
-  const { data: logsData } = useSnapshotLogs(snapshotId, isPushing || isCompleted, 1500);
+  // preview 数据
+  const [previewData, setPreviewData] = useState<PreviewData | null>(null);
+  const [loadingPreview, setLoadingPreview] = useState(true);
 
-  // 默认选第一个防火墙
+  // 拉 preview
   useEffect(() => {
-    if (!firewallId && firewalls && firewalls.length > 0) {
-      setFirewallId(firewalls[0].id);
-    }
-  }, [firewalls, firewallId]);
-
-  // snapshot 进入 success/failed/partial 状态 → 推送结束
-  useEffect(() => {
-    if (snapshot && (snapshot.status === 'success' || snapshot.status === 'failed' || snapshot.status === 'partial')) {
-      setIsPushing(false);
-      setIsCompleted(true);
-    }
-  }, [snapshot]);
-
-  const selectedFw = firewalls?.find((f) => f.id === firewallId);
-
-  const handleStart = async () => {
-    if (!firewallId) {
-      toast.warning('请先选择目标防火墙');
-      return;
-    }
-    if (!policies || policies.length === 0) {
-      toast.warning('工单没有可推送的策略');
-      return;
-    }
-    setIsCompleted(false);
-    setIsPushing(true);
-    setTestResult(null);
-    setSnapshotId(null);
-    try {
-      const result = await startPushMutation.mutateAsync({ firewallId, mode });
-      if (result.snapshot_id) {
-        setSnapshotId(result.snapshot_id);
+    let cancelled = false;
+    (async () => {
+      try {
+        setLoadingPreview(true);
+        const res = await fetch(`/api/workorders/${oid}/preview`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = (await res.json()) as PreviewData;
+        if (!cancelled) setPreviewData(data);
+      } catch (e) {
+        if (!cancelled) toast.apiError(e, '加载预览数据失败');
+      } finally {
+        if (!cancelled) setLoadingPreview(false);
       }
-    } catch (error) {
-      setIsPushing(false);
-      setIsCompleted(false);
-      toast.apiError(error, '启动推送失败');
-    }
-  };
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [oid]);
 
-  const handleReset = () => {
-    setIsPushing(false);
-    setIsCompleted(false);
-    setSnapshotId(null);
-    setTestResult(null);
-  };
-
-  const handleTestConnection = async () => {
-    if (!firewallId) {
-      toast.warning('请先选择目标防火墙');
-      return;
-    }
-    setTestResult(null);
-    try {
-      const r = await testConnMutation.mutateAsync(firewallId);
-      setTestResult({
-        ok: r.success,
-        message: r.success
-          ? `✓ 连接成功 (${r.elapsed_ms}ms)\n设备类型: ${r.device_type}\n版本: ${r.version.slice(0, 100)}`
-          : `✗ 连接失败: ${r.error}`,
-      });
-    } catch (error: any) {
-      setTestResult({
-        ok: false,
-        message: `✗ 测试失败: ${error?.response?.data?.detail || error?.message}`,
-      });
-    }
-  };
-
-  // 进度（用 snapshot 统计 + 实时日志数量估算）
-  const total = snapshot?.total_policies ?? policies?.length ?? 0;
-  const success = snapshot?.new_policies ?? 0;
-  const failed = snapshot?.failed_policies ?? 0;
-  const reused = snapshot?.reused_policies ?? 0;
-  const appended = snapshot?.appended_policies ?? 0;
-  const pending = Math.max(0, total - success - failed);
-  const progress = total > 0 ? Math.round(((success + failed) / total) * 100) : 0;
-
-  // 日志
-  const logs = (logsData as PushLogsResponse | undefined)?.logs ?? [];
+  if (loadingPreview) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="text-lg">加载中...</div>
+      </div>
+    );
+  }
+  if (!previewData) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="text-lg text-red-500">加载失败</div>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
-      {/* 头部 */}
+      {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <Button variant="ghost" size="icon" onClick={() => navigate(`/order/${orderId}/edit`)}>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => navigate(`/order/${oid}/edit`)}
+          >
             <ArrowLeft className="h-5 w-5" />
           </Button>
           <div>
-            <h1 className="text-3xl font-bold">策略推送（v2 流水线）</h1>
+            <h1 className="text-3xl font-bold">策略推送</h1>
             <p className="text-muted-foreground mt-1">
-              {order?.title} · 工单号: {order?.order_no}
+              {previewData.order.title} · 工单号: {previewData.order.order_no}
             </p>
           </div>
         </div>
-        <div className="flex gap-2">
-          {!isPushing && !isCompleted && (
-            <Button onClick={handleStart} disabled={!firewallId || startPushMutation.isPending}>
-              <Play className="mr-2 h-4 w-4" />
-              {startPushMutation.isPending ? '启动中...' : '开始推送'}
-            </Button>
-          )}
-          {isCompleted && (
-            <>
-              <Button variant="outline" onClick={handleReset}>
-                <RotateCcw className="mr-2 h-4 w-4" />
-                重新推送
-              </Button>
-              {snapshotId && (
-                <Button variant="outline" onClick={() => navigate(`/snapshot/${snapshotId}`)}>
-                  <ExternalLink className="mr-2 h-4 w-4" />
-                  查看快照 #{snapshotId}
-                </Button>
-              )}
-              <Button onClick={() => navigate(`/order/${orderId}/edit`)}>
-                <CheckCircle className="mr-2 h-4 w-4" />
-                返回编辑
-              </Button>
-            </>
-          )}
-        </div>
+        <Button variant="outline" onClick={() => navigate(`/order/${oid}/edit`)}>
+          返回编辑
+        </Button>
       </div>
 
-      {/* 配置区：防火墙 + 模式 + 测连通 */}
-      {!isPushing && !isCompleted && (
+      {/* 顶部全局: 3 模式 Radio (适用于所有墙) */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Hash className="h-4 w-4" />
+            推送模式 (适用于所有墙)
+          </CardTitle>
+          <CardDescription>
+            选好后, 每面墙的"推送到这面墙"按钮会用这个模式调用 start-v2
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+            <ModeRadio
+              current={mode}
+              value="deduplicate"
+              title="查重模式"
+              desc="复用整条已存在策略，对象不重用才新建"
+              onChange={setMode}
+            />
+            <ModeRadio
+              current={mode}
+              value="force_push"
+              title="全推模式"
+              desc="对象与策略全错开新建（强制落盘）"
+              onChange={setMode}
+            />
+            <ModeRadio
+              current={mode}
+              value="reuse_objects"
+              title="对象复用模式"
+              desc="复用相同 IP/端口组，策略行新建"
+              onChange={setMode}
+            />
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* 防火墙分组 (按 preview.firewall_groups 顺序) */}
+      {previewData.firewall_groups.length === 0 ? (
         <Card>
-          <CardHeader>
-            <CardTitle>推送配置</CardTitle>
-            <CardDescription>选择目标防火墙和推送模式，建议先测连通</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* 防火墙选择 */}
-              <div className="space-y-2">
-                <label className="text-sm font-medium flex items-center gap-2">
-                  <Server className="h-4 w-4" />
-                  目标防火墙
-                </label>
-                <select
-                  className="w-full h-10 rounded-md border border-input bg-background px-3 text-sm"
-                  value={firewallId ?? ''}
-                  onChange={(e) => {
-                    setFirewallId(Number(e.target.value));
-                    setTestResult(null);
-                  }}
-                  disabled={loadingFws}
-                >
-                  {loadingFws ? (
-                    <option>加载中...</option>
-                  ) : firewalls && firewalls.length > 0 ? (
-                    firewalls.map((fw) => (
-                      <option key={fw.id} value={fw.id}>
-                        {fw.name} ({fw.management_ip}) {fw.region ? `· ${fw.region}` : ''}
-                      </option>
-                    ))
-                  ) : (
-                    <option>暂无可用防火墙</option>
-                  )}
-                </select>
-                {selectedFw && (
-                  <div className="text-xs text-muted-foreground">
-                    类型: <span className="font-mono">{selectedFw.type}</span> · 状态:{' '}
-                    <span className={selectedFw.is_active ? 'text-green-600' : 'text-red-600'}>
-                      {selectedFw.is_active ? '启用' : '停用'}
-                    </span>
-                  </div>
-                )}
-              </div>
-
-              {/* 推送模式 */}
-              <div className="space-y-2">
-                <label className="text-sm font-medium flex items-center gap-2">
-                  <Hash className="h-4 w-4" />
-                  推送模式
-                </label>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setMode('deduplicate')}
-                    className={`p-3 rounded-md border text-left text-sm transition-colors ${
-                      mode === 'deduplicate'
-                        ? 'border-primary bg-primary/5 ring-1 ring-primary'
-                        : 'border-input hover:bg-accent'
-                    }`}
-                  >
-                    <div className="font-medium">查重模式</div>
-                    <div className="text-xs text-muted-foreground mt-1">
-                      复用整条已存在策略，对象不重用才新建
-                    </div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setMode('force_push')}
-                    className={`p-3 rounded-md border text-left text-sm transition-colors ${
-                      mode === 'force_push'
-                        ? 'border-primary bg-primary/5 ring-1 ring-primary'
-                        : 'border-input hover:bg-accent'
-                    }`}
-                  >
-                    <div className="font-medium">全推模式</div>
-                    <div className="text-xs text-muted-foreground mt-1">
-                      对象与策略全错开新建（强制落盘）
-                    </div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setMode('reuse_objects')}
-                    className={`p-3 rounded-md border text-left text-sm transition-colors ${
-                      mode === 'reuse_objects'
-                        ? 'border-primary bg-primary/5 ring-1 ring-primary'
-                        : 'border-input hover:bg-accent'
-                    }`}
-                  >
-                    <div className="font-medium">对象复用模式</div>
-                    <div className="text-xs text-muted-foreground mt-1">
-                      复用相同 IP/端口组，策略行新建
-                    </div>
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* 测连通 */}
-            <div className="flex items-center gap-2 pt-2 border-t">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleTestConnection}
-                disabled={!firewallId || testConnMutation.isPending}
-              >
-                <Wifi className="mr-2 h-4 w-4" />
-                {testConnMutation.isPending ? '测试中...' : '测连通'}
-              </Button>
-              {testResult && (
-                <div
-                  className={`flex items-start gap-2 text-sm flex-1 ${
-                    testResult.ok ? 'text-green-600' : 'text-red-600'
-                  }`}
-                >
-                  {testResult.ok ? (
-                    <CheckCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
-                  ) : (
-                    <XCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
-                  )}
-                  <pre className="whitespace-pre-wrap text-xs font-mono">{testResult.message}</pre>
-                </div>
-              )}
-            </div>
+          <CardContent className="py-8 text-center text-muted-foreground">
+            preview 没找到命中的防火墙, 无需推送
           </CardContent>
+        </Card>
+      ) : (
+        previewData.firewall_groups.map((group) => (
+          <FirewallPushCard
+            key={group.firewall.id}
+            orderId={oid}
+            group={group}
+            mode={mode}
+          />
+        ))
+      )}
+
+      {/* 未匹配的策略 (提示一下, 但不推送) */}
+      {previewData.unmatched_policies.length > 0 && (
+        <Card className="border-yellow-500/50 bg-yellow-500/5">
+          <CardHeader>
+            <CardTitle className="text-base text-yellow-700 flex items-center gap-2">
+              <AlertCircle className="h-4 w-4" />
+              未匹配防火墙的策略 ({previewData.unmatched_policies.length} 条)
+            </CardTitle>
+            <CardDescription>
+              这部分策略 preview 没找到命中的防火墙, 不会出现在上面的墙列表里
+            </CardDescription>
+          </CardHeader>
         </Card>
       )}
 
-      {/* 进度 + 日志 */}
-      {(isPushing || isCompleted) && (
-        <>
-          <PushProgressBar
-            total={total}
-            success={success}
-            failed={failed}
-            pending={pending}
-            progress={progress}
-            isProcessing={isPushing}
-          />
-
-          {snapshot && (
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">快照统计</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="grid grid-cols-5 gap-4 text-center text-sm">
-                  <div>
-                    <div className="text-2xl font-bold">{total}</div>
-                    <div className="text-xs text-muted-foreground">总策略</div>
-                  </div>
-                  <div>
-                    <div className="text-2xl font-bold text-green-600">{success}</div>
-                    <div className="text-xs text-muted-foreground">新建</div>
-                  </div>
-                  <div>
-                    <div className="text-2xl font-bold text-blue-600">{reused}</div>
-                    <div className="text-xs text-muted-foreground">复用整条</div>
-                  </div>
-                  <div>
-                    <div className="text-2xl font-bold text-purple-600">{appended}</div>
-                    <div className="text-xs text-muted-foreground">追加</div>
-                  </div>
-                  <div>
-                    <div className="text-2xl font-bold text-red-600">{failed}</div>
-                    <div className="text-xs text-muted-foreground">失败</div>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          )}
-
-          <PushLogViewer logs={logs} />
-        </>
-      )}
-
-      {/* 完成提示 */}
-      {isCompleted && snapshot && (
-        <Card
-          className={
-            snapshot.status === 'success'
-              ? 'border-green-500/50 bg-green-500/5'
-              : snapshot.status === 'partial'
-              ? 'border-yellow-500/50 bg-yellow-500/5'
-              : 'border-red-500/50 bg-red-500/5'
-          }
-        >
+      {/* 错误提示 */}
+      {previewData.errors.length > 0 && (
+        <Card className="border-red-500/50">
           <CardHeader>
-            <div className="flex items-center gap-2">
-              {snapshot.status === 'success' ? (
-                <CheckCircle className="h-5 w-5 text-green-500" />
-              ) : (
-                <AlertCircle className="h-5 w-5 text-red-500" />
-              )}
-              <CardTitle>
-                推送{snapshot.status === 'success' ? '成功' : snapshot.status === 'partial' ? '部分成功' : '失败'}
-              </CardTitle>
-            </div>
-            <CardDescription>
-              耗时 {snapshot.finished_at && snapshot.started_at
-                ? `${Math.round((new Date(snapshot.finished_at).getTime() - new Date(snapshot.started_at).getTime()) / 1000)}s`
-                : '-'}
-              {' '}· 快照 #{snapshot.id} (batch {snapshot.batch_id.slice(0, 8)})
-            </CardDescription>
+            <CardTitle className="text-base text-red-600">错误</CardTitle>
           </CardHeader>
+          <CardContent>
+            <ul className="list-disc list-inside text-sm text-red-600 space-y-1">
+              {previewData.errors.map((e, i) => (
+                <li key={i}>{e}</li>
+              ))}
+            </ul>
+          </CardContent>
         </Card>
       )}
     </div>
   );
 };
+
+// =============================================================
+// ModeRadio - 3 模式单选按钮
+// =============================================================
+
+interface ModeRadioProps {
+  current: PushMode;
+  value: PushMode;
+  title: string;
+  desc: string;
+  onChange: (v: PushMode) => void;
+}
+
+const ModeRadio = ({ current, value, title, desc, onChange }: ModeRadioProps) => (
+  <button
+    type="button"
+    onClick={() => onChange(value)}
+    className={`p-3 rounded-md border text-left text-sm transition-colors ${
+      current === value
+        ? 'border-primary bg-primary/5 ring-1 ring-primary'
+        : 'border-input hover:bg-accent'
+    }`}
+  >
+    <div className="font-medium">{title}</div>
+    <div className="text-xs text-muted-foreground mt-1">{desc}</div>
+  </button>
+);
+
+// =============================================================
+// FirewallPushCard - 单面墙的推送 Card
+// =============================================================
+
+interface FirewallPushCardProps {
+  orderId: number;
+  group: FirewallGroup;
+  mode: PushMode;
+}
+
+const FirewallPushCard = ({ orderId, group, mode }: FirewallPushCardProps) => {
+  const fw = group.firewall;
+  const startPushMutation = useStartPushV2(orderId);
+
+  // 折叠: 命令预览 + 推送进度 (默认都折叠)
+  const [scriptExpanded, setScriptExpanded] = useState(false);
+  const [scriptData, setScriptData] = useState<GenerateScriptResponse | null>(
+    null,
+  );
+  const [scriptLoading, setScriptLoading] = useState(false);
+  const [scriptError, setScriptError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  // 推送状态
+  const [snapshotId, setSnapshotId] = useState<number | null>(null);
+  const [pushing, setPushing] = useState(false);
+  const [completed, setCompleted] = useState(false);
+
+  const { data: snapshot } = useSnapshot(snapshotId);
+  const { data: logsData } = useSnapshotLogs(
+    snapshotId,
+    pushing || completed,
+    1500,
+  );
+
+  // snapshot 终态 → 推送结束
+  useEffect(() => {
+    if (
+      snapshot &&
+      (snapshot.status === 'success' ||
+        snapshot.status === 'failed' ||
+        snapshot.status === 'partial')
+    ) {
+      setPushing(false);
+      setCompleted(true);
+    }
+  }, [snapshot]);
+
+  // 加载 generate-script (按需)
+  const handleLoadScript = async () => {
+    if (scriptData) {
+      setScriptExpanded(!scriptExpanded);
+      return;
+    }
+    setScriptExpanded(true);
+    setScriptLoading(true);
+    setScriptError(null);
+    try {
+      const res = await fetch(
+        `/api/push/orders/${orderId}/generate-script?firewall_id=${fw.id}`,
+        { method: 'POST' },
+      );
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body?.detail || `HTTP ${res.status}`);
+      }
+      const data = (await res.json()) as GenerateScriptResponse;
+      setScriptData(data);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '加载失败';
+      setScriptError(msg);
+      toast.apiError(e, '生成命令失败');
+    } finally {
+      setScriptLoading(false);
+    }
+  };
+
+  // 复制命令
+  const handleCopy = async () => {
+    if (!scriptData?.commands?.length) return;
+    try {
+      await navigator.clipboard.writeText(scriptData.commands.join('\n'));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (e) {
+      toast.apiError(e, '复制失败');
+    }
+  };
+
+  // 推送到这面墙
+  const handleStart = async () => {
+    if (group.policies.length === 0) {
+      toast.warning('该防火墙没有可推送的策略');
+      return;
+    }
+    setCompleted(false);
+    setPushing(true);
+    setSnapshotId(null);
+    try {
+      const result = await startPushMutation.mutateAsync({
+        firewallId: fw.id,
+        mode,
+      });
+      if (result.snapshot_id) {
+        setSnapshotId(result.snapshot_id);
+      }
+    } catch (error) {
+      setPushing(false);
+      toast.apiError(error, '启动推送失败');
+    }
+  };
+
+  // 推送进度数据
+  const total = snapshot?.total_policies ?? 0;
+  const success = snapshot?.new_policies ?? 0;
+  const failed = snapshot?.failed_policies ?? 0;
+  const pending = Math.max(0, total - success - failed);
+  const progress = total > 0 ? Math.round(((success + failed) / total) * 100) : 0;
+  const logs = (logsData as PushLogsResponse | undefined)?.logs ?? [];
+
+  return (
+    <Card
+      data-testid={`push-card-fw-${fw.id}`}
+      className={completed && snapshot ? statusBorder(snapshot.status) : ''}
+    >
+      <CardHeader>
+        <div className="flex items-center justify-between">
+          <div className="flex-1 min-w-0">
+            <CardTitle className="text-xl flex items-center gap-2 flex-wrap">
+              <Server className="h-4 w-4 flex-shrink-0" />
+              {fw.name}
+              {fw.alias && (
+                <span className="text-sm text-muted-foreground font-normal">
+                  ({fw.alias})
+                </span>
+              )}
+              {fw.is_zone_boundary === 1 && (
+                <Badge className="bg-emerald-500 hover:bg-emerald-600 text-white">
+                  <Send className="h-3 w-3 mr-1" />
+                  将在此墙推送
+                </Badge>
+              )}
+            </CardTitle>
+            <CardDescription className="mt-1">
+              类型: <span className="font-mono">{fw.type}</span> · 管理 IP:{' '}
+              <span className="font-mono">{fw.management_ip}</span> · 区域:{' '}
+              {fw.belong_region || '未设置'} ·{' '}
+              <span className="font-semibold">
+                {group.policies.length} 条策略
+              </span>
+            </CardDescription>
+          </div>
+          {/* 推送按钮 + 模式提示 */}
+          <div className="flex items-center gap-2 flex-shrink-0">
+            {!pushing && !completed && (
+              <Button
+                onClick={handleStart}
+                disabled={startPushMutation.isPending}
+                data-testid={`push-btn-fw-${fw.id}`}
+              >
+                <Play className="mr-2 h-4 w-4" />
+                {startPushMutation.isPending ? '启动中...' : '推送到这面墙'}
+              </Button>
+            )}
+            {completed && (
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setCompleted(false);
+                  setPushing(false);
+                  setSnapshotId(null);
+                }}
+              >
+                重新推送
+              </Button>
+            )}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {/* 当前模式提示 */}
+        <div className="text-xs text-muted-foreground flex items-center gap-2">
+          <Hash className="h-3 w-3" />
+          当前模式:{' '}
+          <span className="font-mono font-semibold">{mode}</span>
+          {' · '}
+          注意: generate-script 是 dry-run (不连设备), 与实际 start-v2 推送语义可能不同
+        </div>
+
+        {/* 命令预览 (折叠) */}
+        <div>
+          <button
+            onClick={handleLoadScript}
+            className="flex items-center gap-2 text-sm font-semibold text-slate-700 hover:text-slate-900"
+            data-testid={`script-toggle-fw-${fw.id}`}
+          >
+            {scriptExpanded ? (
+              <ChevronDown className="h-4 w-4" />
+            ) : (
+              <ChevronRight className="h-4 w-4" />
+            )}
+            <FileCode className="h-4 w-4" />
+            查看即将推送的命令 (dry-run)
+          </button>
+
+          {scriptExpanded && (
+            <div className="mt-2 space-y-2">
+              {scriptLoading && (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground py-4">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  正在生成脚本...
+                </div>
+              )}
+              {scriptError && (
+                <div className="flex items-start gap-2 p-3 bg-red-50 border border-red-200 rounded text-red-700 text-sm">
+                  <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <div className="font-semibold">生成失败</div>
+                    <div>{scriptError}</div>
+                  </div>
+                </div>
+              )}
+              {scriptData && (
+                <>
+                  {/* 4 卡片统计 */}
+                  <div className="grid grid-cols-4 gap-2">
+                    <MiniStat label="工单策略" value={scriptData.stats.total_order_policies} />
+                    <MiniStat
+                      label="可推送"
+                      value={scriptData.stats.to_push}
+                      highlight
+                    />
+                    <MiniStat
+                      label="跳过"
+                      value={scriptData.stats.skipped}
+                      warn={scriptData.stats.skipped > 0}
+                    />
+                    <MiniStat
+                      label="命令条数"
+                      value={scriptData.stats.commands}
+                      highlight
+                    />
+                  </div>
+
+                  {/* skipped 警告 */}
+                  {scriptData.skipped.length > 0 && (
+                    <div className="p-2 bg-orange-50 border border-orange-200 rounded text-xs">
+                      <div className="font-semibold text-orange-800 mb-1">
+                        跳过 {scriptData.skipped.length} 条
+                      </div>
+                      <ul className="text-orange-700 space-y-0.5 max-h-24 overflow-auto">
+                        {scriptData.skipped.map((s, i) => (
+                          <li key={i}>
+                            P{s.policy_id} {s.source_ip} → {s.dest_ip} — {s.reason}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* 黑色终端命令 */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="text-xs font-semibold text-slate-600">
+                        CLI 命令 ({scriptData.commands.length} 条)
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleCopy}
+                        disabled={!scriptData.commands.length}
+                      >
+                        {copied ? (
+                          <>
+                            <Check className="h-3 w-3 mr-1 text-green-600" />
+                            已复制
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="h-3 w-3 mr-1" />
+                            复制
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                    <pre className="bg-slate-900 text-green-300 p-2 rounded font-mono text-xs leading-relaxed overflow-auto max-h-64 select-text">
+                      {scriptData.commands.length === 0
+                        ? '（无可生成命令）'
+                        : scriptData.commands.join('\n')}
+                    </pre>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* 推送中 / 完成: 进度 + 日志 */}
+        {(pushing || completed) && snapshot && (
+          <div className="space-y-3 pt-3 border-t">
+            <PushProgressBar
+              total={total}
+              success={success}
+              failed={failed}
+              pending={pending}
+              progress={progress}
+              isProcessing={pushing}
+            />
+            {/* 模式提示 (跟 start-v2 用的 mode 一致) */}
+            <div className="text-xs text-muted-foreground">
+              模式: <span className="font-mono">{snapshot.push_mode}</span> · 批次:{' '}
+              <span className="font-mono">
+                {snapshot.batch_id.slice(0, 8)}
+              </span>
+            </div>
+            {logs.length > 0 && <PushLogViewer logs={logs} />}
+            {completed && snapshot.status !== 'success' && snapshot.error_log && (
+              <div className="p-2 bg-red-50 border border-red-200 rounded text-xs">
+                <div className="font-semibold text-red-700 mb-1">错误日志</div>
+                <pre className="text-red-600 whitespace-pre-wrap font-mono text-xs">
+                  {snapshot.error_log}
+                </pre>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 推送完成状态摘要 */}
+        {completed && snapshot && (
+          <div
+            className={`p-2 rounded text-sm flex items-center gap-2 ${
+              snapshot.status === 'success'
+                ? 'bg-green-500/10 text-green-700'
+                : snapshot.status === 'partial'
+                ? 'bg-yellow-500/10 text-yellow-700'
+                : 'bg-red-500/10 text-red-700'
+            }`}
+          >
+            {snapshot.status === 'success' ? (
+              <CheckCircle className="h-4 w-4" />
+            ) : (
+              <XCircle className="h-4 w-4" />
+            )}
+            <span className="font-semibold">
+              {snapshot.status === 'success'
+                ? '推送成功'
+                : snapshot.status === 'partial'
+                ? '部分成功'
+                : '推送失败'}
+            </span>
+            <span className="text-xs">
+              (新建 {snapshot.new_policies} / 复用 {snapshot.reused_policies} / 失败{' '}
+              {snapshot.failed_policies} / 总 {snapshot.total_policies})
+            </span>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+};
+
+// =============================================================
+// 小工具
+// =============================================================
+
+const statusBorder = (s: string) => {
+  switch (s) {
+    case 'success':
+      return 'border-green-500/50';
+    case 'partial':
+      return 'border-yellow-500/50';
+    case 'failed':
+      return 'border-red-500/50';
+    default:
+      return '';
+  }
+};
+
+const MiniStat = ({
+  label,
+  value,
+  highlight,
+  warn,
+}: {
+  label: string;
+  value: number;
+  highlight?: boolean;
+  warn?: boolean;
+}) => (
+  <div
+    className={`border rounded p-2 text-center ${
+      warn
+        ? 'border-orange-300 bg-orange-50'
+        : highlight
+        ? 'border-blue-300 bg-blue-50'
+        : 'border-slate-200'
+    }`}
+  >
+    <div className="text-xs text-muted-foreground">{label}</div>
+    <div
+      className={`text-xl font-bold ${
+        warn ? 'text-orange-700' : highlight ? 'text-blue-700' : 'text-slate-800'
+      }`}
+    >
+      {value}
+    </div>
+  </div>
+);
