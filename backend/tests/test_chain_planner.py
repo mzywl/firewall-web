@@ -18,10 +18,11 @@ from app.models import (
     Firewall, Policy, Order, OrderStatus, FirewallType, ConnectionType,
     ZoneAccessConfig,
 )
+from tests.conftest import make_firewall_with_zones
 
 
 # ============================================================
-# 工厂 fixtures: 造多防火墙拓扑 (1 boundary + 1 后游)
+# 工厂 fixtures: 造多防火墙拓扑 (1 boundary + 1 后游 + 1 同区)
 # ============================================================
 
 @pytest.fixture
@@ -29,26 +30,14 @@ def boundary_fw(db_session):
     """边界防火墙 fw6-like: 测试区, outbound_snat_pool='10.223.32.1'
     只配 internal 段 (避免 src 误判为 inbound SNAT 透传, 本测试聚焦 outbound + Pass 2)
     """
-    fw = Firewall(
-        name='fw-boundary',
-        alias='边界墙',
-        type=FirewallType.fortigate,
-        management_ip='10.99.99.6',
-        region='测试区',
-        covered_region='测试区',
-        local_zone_name='Trust',
-        external_zone_name='Untrust',
-        connection_type=ConnectionType.ssh,
-        internal_protected_ips='192.101.64.0/24\n192.101.66.0/24',
-        external_protected_ips='203.0.113.0/24',  # 跟下游 external 不重叠, 避免误判
-        is_zone_boundary=1,
-        auto_push=0,
-        outbound_snat_pool='10.223.32.1',
+    return make_firewall_with_zones(
+        db_session, name='fw-boundary', fw_type=FirewallType.fortigate,
+        mgmt_ip='10.99.99.6', belong_region='测试区', is_zone_boundary=1,
+        internal_cidr='192.101.64.0/24\n192.101.66.0/24', internal_connect='测试区',
+        external_cidr='203.0.113.0/24', external_connect='生产区',
+        snat_pool='10.223.32.1',
+        source_region='生产区', dest_region='测试区',
     )
-    db_session.add(fw)
-    db_session.commit()
-    db_session.refresh(fw)
-    return fw
 
 
 @pytest.fixture
@@ -56,25 +45,12 @@ def downstream_fw(db_session):
     """后游防火墙 fw14-like: 生产区, non-boundary, 物理上看到的是 SNAT 后 src.
     external 段不含 boundary.internal 段 (192.101.64.0/24), 避免直连 inbound 误判为 inbound SNAT 透传.
     """
-    fw = Firewall(
-        name='fw-downstream',
-        alias='后游墙',
-        type=FirewallType.h3c,
-        management_ip='10.99.99.14',
-        region='生产区',
-        covered_region='生产区',
-        local_zone_name='Trust',
-        external_zone_name='Untrust',
-        connection_type=ConnectionType.ssh,
-        internal_protected_ips='10.2.179.0/24',
-        external_protected_ips='10.0.0.0/8',  # 不含 192.101.64.0/24
-        is_zone_boundary=0,
-        auto_push=0,
+    return make_firewall_with_zones(
+        db_session, name='fw-downstream', fw_type=FirewallType.h3c,
+        mgmt_ip='10.99.99.14', belong_region='生产区', is_zone_boundary=0,
+        internal_cidr='10.2.179.0/24', internal_connect='生产区',
+        external_cidr='10.0.0.0/8', external_connect='测试区',
     )
-    db_session.add(fw)
-    db_session.commit()
-    db_session.refresh(fw)
-    return fw
 
 
 @pytest.fixture
@@ -82,25 +58,12 @@ def same_region_fw(db_session):
     """同区防火墙 (fw7-like): 测试区, non-boundary, 跟 boundary_fw 同 region.
     跟 boundary.internal 段不重叠, 避免 splitter 把它当 boundary 下游.
     """
-    fw = Firewall(
-        name='fw-same-region',
-        alias='同区墙',
-        type=FirewallType.h3c,
-        management_ip='10.99.99.7',
-        region='测试区',
-        covered_region='测试区',
-        local_zone_name='Trust',
-        external_zone_name='Untrust',
-        connection_type=ConnectionType.ssh,
-        internal_protected_ips='172.16.0.0/16',  # 跟 boundary 不重叠
-        external_protected_ips='10.0.0.0/8',
-        is_zone_boundary=0,
-        auto_push=0,
+    return make_firewall_with_zones(
+        db_session, name='fw-same-region', fw_type=FirewallType.h3c,
+        mgmt_ip='10.99.99.7', belong_region='测试区', is_zone_boundary=0,
+        internal_cidr='172.16.0.0/16', internal_connect='测试区',  # 跟 boundary 不重叠
+        external_cidr='10.0.0.0/8', external_connect='生产区',
     )
-    db_session.add(fw)
-    db_session.commit()
-    db_session.refresh(fw)
-    return fw
 
 
 def _make_order(db_session, order_no='TEST-CHAIN-001'):
@@ -120,12 +83,14 @@ def _make_order(db_session, order_no='TEST-CHAIN-001'):
 def _make_policy(db_session, order_id, **kwargs):
     defaults = dict(
         order_id=order_id,
-        firewall_id=None,
         source_system_name='生产区',
         source_ip='10.1.1.0/24',
         dest_system_name='测试区',
         dest_ip='192.168.1.10',
         service='443',
+        # spec §1 强制 NN — 默认给 placeholder firewall_id=1
+        firewall_id=kwargs.pop('firewall_id', 1),
+        device_source_zone='Trust', device_dest_zone='Untrust',
     )
     defaults.update(kwargs)
     p = Policy(**defaults)
@@ -136,8 +101,14 @@ def _make_policy(db_session, order_id, **kwargs):
 
 
 def _make_zone_cfg(db_session, firewall_id, src, dst):
+    """对齐 spec §1: source_zone/dest_zone → source_region/dest_region
+    + boundary_*_zone 强制 NN
+    """
     cfg = ZoneAccessConfig(
-        firewall_id=firewall_id, source_zone=src, dest_zone=dst, description='test'
+        firewall_id=firewall_id,
+        source_region=src, dest_region=dst,
+        boundary_source_zone='Untrust', boundary_dest_zone='Trust',
+        description='test',
     )
     db_session.add(cfg)
     db_session.commit()

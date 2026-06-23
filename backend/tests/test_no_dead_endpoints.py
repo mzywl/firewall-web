@@ -22,11 +22,21 @@ from app.api.push import router as push_router
 # ============================================================
 
 def test_policy_merger_file_deleted():
-    """PolicyMerger 文件必须删 (端口 range 性能炸弹, 已被 V2 替代)"""
-    container_path = "/app/app/core/policy_merger.py"
-    assert not os.path.exists(container_path), (
-        f"{container_path} 不应存在 (死代码, 端口 range 性能炸弹)"
-    )
+    """PolicyMerger 文件必须删 (端口 range 性能炸弹, 已被 V2 替代)
+
+    兼容性: 检查 host + 容器两路径, 任一存在即 fail.
+    期望所有路径都不存在 → 文件没复活 → pass.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    backend_dir = os.path.dirname(here)
+    candidates = [
+        os.path.join(backend_dir, "app", "core", "policy_merger.py"),  # host
+        "/app/app/core/policy_merger.py",                              # 容器
+    ]
+    for p in candidates:
+        assert not os.path.exists(p), (
+            f"{p} 不应存在 (死代码, 端口 range 性能炸弹)"
+        )
 
 
 def test_policy_merger_import_raises():
@@ -38,10 +48,19 @@ def test_policy_merger_import_raises():
 
 
 def test_push_py_does_not_import_policy_merger():
-    """push.py 不能 import PolicyMerger (防回退)"""
-    # 容器内 push.py 路径
-    push_path = "/app/app/api/push.py"
-    assert os.path.exists(push_path), f"{push_path} 应存在"
+    """push.py 不能 import PolicyMerger (防回退)
+
+    dev 兼容: 容器内 / host 都能找到 push.py
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    backend_dir = os.path.dirname(here)
+    candidates = [
+        os.path.join(backend_dir, "app", "api", "push.py"),  # host
+        "/app/app/api/push.py",                              # 容器
+    ]
+    push_path = next((p for p in candidates if os.path.exists(p)), None)
+    if push_path is None:
+        pytest.skip("push.py 不可访问 (无 backend 挂载)")
     with open(push_path) as f:
         content = f.read()
     assert "from app.core.policy_merger" not in content, (

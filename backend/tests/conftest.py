@@ -103,6 +103,52 @@ def client_with_db(db_session):
 # Factory fixtures - 快速造测试数据 (对齐 spec)
 # ============================================================
 
+def make_firewall_with_zones(
+    db_session, name, fw_type, mgmt_ip, belong_region, is_zone_boundary,
+    internal_cidr, internal_connect, external_cidr, external_connect,
+    snat_pool=None, source_region=None, dest_region=None,
+):
+    """造一个 fw + 2 个 zone (内/外) + 可选 zone access config (SNAT 池)
+
+    对齐 重构.md §1 spec:
+      - Firewall 字段: belong_region (was region) / 删老 12 字段
+      - IP 资产用 FirewallZone (internal/external) 表达
+      - SNAT 池用 ZoneAccessConfig 表达
+    """
+    fw = Firewall(
+        name=name, type=fw_type, management_ip=mgmt_ip,
+        belong_region=belong_region,
+        connection_type=ConnectionType.ssh,
+        is_zone_boundary=is_zone_boundary,
+        auto_push=0,
+    )
+    db_session.add(fw); db_session.commit()
+    db_session.refresh(fw)
+
+    # Internal zone: connect_region 跟 firewall.belong_region 同 region
+    db_session.add(FirewallZone(
+        firewall_id=fw.id, zone_name='Trust',
+        protected_ips=internal_cidr, connect_region=internal_connect,
+    ))
+    # External zone: connect_region 跟 firewall.belong_region 不同 region
+    db_session.add(FirewallZone(
+        firewall_id=fw.id, zone_name='Untrust',
+        protected_ips=external_cidr, connect_region=external_connect,
+    ))
+    db_session.commit()
+
+    # SNAT 池 (只有 boundary 才需要)
+    if snat_pool and source_region and dest_region:
+        db_session.add(ZoneAccessConfig(
+            firewall_id=fw.id,
+            source_region=source_region, dest_region=dest_region,
+            boundary_source_zone='Untrust', boundary_dest_zone='Trust',
+            need_nat=1, snat_pool=snat_pool,
+        ))
+        db_session.commit()
+    return fw
+
+
 @pytest.fixture
 def sample_firewall(db_session):
     """一个最小可用的边界防火墙, belong_region='测试区', 内部=Trust, 外部=DMZ
@@ -180,6 +226,10 @@ def sample_policy(db_session, sample_firewall):
         dest_ip='192.168.1.10',
         service='443',
         firewall_id=sample_firewall.id,  # 新设计: spec 强制 NOT NULL
+        device_source_zone='内网',         # 新设计: spec §1 强制 NOT NULL
+        device_dest_zone='DMZ',            # 新设计: spec §1 强制 NOT NULL
+        usage_time='',                     # 默认空字符串, 跟前端 /api/orders/<id>/policies 用户未填时一致
+                                            # test_orders_field_map 依赖 str(usage_time) 不变化 (idempotent)
     )
     db_session.add(policy)
     db_session.commit()

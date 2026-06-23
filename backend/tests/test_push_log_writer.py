@@ -43,12 +43,29 @@ def _make_snapshot(db_session, order_id, firewall_id):
 
 
 def _make_order_and_fw(db_session):
+    """造一个最小可用的 fw + order (对齐 重构.md §1 spec)
+
+    Firewall 字段: belong_region (was region), 删老 12 字段.
+    加 FirewallZone 表达 IP 资产 (老 internal/external_protected_ips 字段已删).
+    """
     fw = Firewall(
         name='fw-test', type=FirewallType.fortigate, management_ip='10.99.99.1',
-        region='测试区', local_zone_name='内网', external_zone_name='DMZ',
+        belong_region='测试区',                          # 新设计: region → belong_region
         connection_type=ConnectionType.ssh, auto_push=0,
     )
     db_session.add(fw); db_session.commit()
+    db_session.refresh(fw)
+    # 加 FirewallZone 表达 IP 资产
+    from app.models import FirewallZone
+    db_session.add(FirewallZone(
+        firewall_id=fw.id, zone_name='内网',
+        protected_ips='10.0.0.0/8', connect_region='测试区',
+    ))
+    db_session.add(FirewallZone(
+        firewall_id=fw.id, zone_name='DMZ',
+        protected_ips='192.168.0.0/16', connect_region='生产区',
+    ))
+    db_session.commit()
     order = Order(
         order_no='TEST-LOG-001', title='log test', status=OrderStatus.pending,
         excel_file_path='/tmp/fake.xlsx',
@@ -111,6 +128,7 @@ def test_push_log_writer_survives_main_transaction_rollback(db_session):
     db_session.add(Policy(
         order_id=order_id, firewall_id=fw_id,
         source_ip='1.1.1.1', dest_ip='2.2.2.2', service='80',
+        device_source_zone='内网', device_dest_zone='DMZ',  # spec §1 强制 NN
     ))
     with pytest.raises(RuntimeError):
         try:

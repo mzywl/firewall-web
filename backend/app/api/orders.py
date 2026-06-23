@@ -295,9 +295,14 @@ def update_policies(order_id: int, policies_data: List[dict], db: Session = Depe
                         policy.device_source_zone = matches[0]['device_source_zone']
                         policy.device_dest_zone = matches[0]['device_dest_zone']
                     else:
-                        policy.firewall_id = None
-                        policy.device_source_zone = None
-                        policy.device_dest_zone = None
+                        # 2026-06-23: 不清 firewall_id / device_*_zone (spec §1 强制 NOT NULL)
+                        # spec 重写时这条 else 分支没联动改, 导致 PUT /policies 触发 NN 约束
+                        # 失败. 真要解绑 firewall 走 DELETE firewall (C1 cascade 已支持),
+                        # 不该在 update 流程里把必填字段清空
+                        logger.warning(
+                            f"策略 {policy.id} 更新后未匹配到 firewall, "
+                            f"保留原 firewall_id={policy.firewall_id}, device_*_zone 不动"
+                        )
                 except Exception as match_err:
                     logger.warning(f"更新策略后执行严格重匹配失败: {match_err}")
 
