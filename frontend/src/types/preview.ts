@@ -134,6 +134,12 @@ export interface GenerateScriptNewPolicy {
   src_zone: string;
   dst_zone: string;
   action: string;
+  // C8 接入 PrePushAnalyzer 后的额外字段
+  match_mode?: 'FULL_MATCH' | 'TIME_UPDATE' | 'NEW_RULE';
+  reused_rule_name?: string | null;
+  reused_rule_content?: string | null;
+  push_script?: string[];
+  audit_message?: string;
 }
 
 export interface GenerateScriptStats {
@@ -141,6 +147,10 @@ export interface GenerateScriptStats {
   to_push: number;
   skipped: number;
   commands: number;
+  // C8 接入 PrePushAnalyzer 后的 3 mode 计数
+  full_match?: number;
+  time_update?: number;
+  new_rule?: number;
 }
 
 export interface GenerateScriptResponse {
@@ -158,6 +168,9 @@ export interface GenerateScriptResponse {
   };
   stats: GenerateScriptStats;
   new_policies: GenerateScriptNewPolicy[];
+  policies?: GenerateScriptNewPolicy[];  // C8: 跟 new_policies 同义, 保留兼容
   commands: string[];
   skipped: GenerateScriptSkipped[];
+  device_config_fetched?: boolean;
+  fetch_error?: string | null;
 }

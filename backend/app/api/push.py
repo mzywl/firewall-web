@@ -13,13 +13,20 @@
 - GET  /api/push/snapshots                      全部快照（分页）
 """
 import json
+import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+logger = logging.getLogger(__name__)
+
 from app.core.policy_splitter_v2 import PolicySplitterV2
 from app.database import get_db
+from app.services.push_analyzer import (
+    PrePushAnalyzer,
+    h3c_policies_to_fw_cache,
+)
 from app.models import (
     Firewall,
     Order,
@@ -380,24 +387,32 @@ def list_snapshots(
 def generate_push_script(
     order_id: int,
     firewall_id: int = Query(..., description="目标防火墙 ID"),
+    fetch_device_config: bool = Query(
+        False,
+        description="是否连墙拉取真实配置做 6 要素复用分析 (False=纯本地 dry-run, 所有策略都 NEW_RULE)",
+    ),
     db: Session = Depends(get_db),
 ):
-    """本地生成推送到指定防火墙的 CLI 命令脚本（dry-run / 预览用）
+    """本地生成推送到指定防火墙的 CLI 命令脚本 (dry-run / 预览用)
 
-    设计前提:
+    设计前提 (fetch_device_config=False 时):
       - 假设设备上没有可复用的地址/服务/时间对象 → 全部新建
       - 走 PolicySplitterV2 把多 IP 策略拆成单 IP 策略
       - 只保留命中本防火墙 (firewall_id) 的策略
       - 同一 (src_ip, dst_ip, port) 只生成一次对象
 
-    不会做:
-      - SSH 连接设备
-      - 拉取/解析设备配置
-      - 走 PolicyMatcher 复用现有对象
-      - 创建 PushedPolicySnapshot / 写 PushedPolicyItem
-      - 改任何 DB 状态（只读）
+    设计前提 (fetch_device_config=True 时):
+      - 走 H3CClient.fetch_running_config 连墙拉配置 (SSH 失败 graceful fallback 到空 cache)
+      - 喂给 PrePushAnalyzer 做 6 要素校验 (Zone × srcIP × dstIP × Port × Time)
+      - 3 种归宿: FULL_MATCH (skip) / TIME_UPDATE (改时间) / NEW_RULE (全新建)
+      - 返回的 policies 数组每条都带 match_mode / reused_rule_name / audit_message / push_script
 
-    返回: { success, firewall, order, stats, new_policies, commands, skipped }
+    不会做:
+      - 写 PushedPolicySnapshot / PushedPolicyItem (这是 dry-run)
+      - 改任何 DB 状态 (只读)
+
+    返回: { success, firewall, order, stats, policies(每条带 match_mode/audit_message),
+             commands, skipped, device_config_fetched, fetch_error }
     """
     order = db.query(Order).filter(Order.id == order_id).first()
     if not order:
@@ -442,7 +457,7 @@ def generate_push_script(
 
     # 3. 拆分 + 过滤本防火墙命中的策略
     splitter = PolicySplitterV2(db)
-    new_policies: List[Dict[str, Any]] = []
+    raw_policies: List[Dict[str, Any]] = []  # 拆分后未分析, 待 PrePushAnalyzer 处理
     skipped: List[Dict[str, Any]] = []
     seen: set = set()  # 防 (src, dst, port) 重复建对象
 
@@ -473,7 +488,7 @@ def generate_push_script(
                 continue
             seen.add(dedup_key)
 
-            new_policies.append({
+            raw_policies.append({
                 "policy_id": p.id,
                 "rule_name": f"O{order.order_no}-P{p.id}-{idx}",
                 "src_ips": [sp["source_ip"]],
@@ -482,19 +497,110 @@ def generate_push_script(
                 "valid_until": _normalize_valid_until(usage_time_by_id.get(p.id, "长期")),
                 "src_zone": p.device_source_zone or "any",
                 "dst_zone": p.device_dest_zone or "any",
-                "action": "permit",  # spec §1 删了 Policy.action, 固定 permit (对齐 chain_planner.py:202)
+                "action": "permit",  # spec §1 删了 Policy.action, 固定 permit
             })
 
-    # 4. 生成命令
-    try:
-        commands = client.generate_commands(
-            new_policies=new_policies,
-            existing_addresses=[],
-            existing_services=[],
-            existing_schedules=[],
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"生成命令失败: {e}")
+    # 3.5 接 PrePushAnalyzer 做 6 要素校验 (fetch_device_config=True 时)
+    #     或回退到 NEW_RULE (False 时)
+    analyzer: PrePushAnalyzer
+    device_config_fetched = False
+    fetch_error: Optional[str] = None
+    if fetch_device_config:
+        try:
+            # 这里假定 SSH 凭据在 fw 上有 (生产环境会从 fw 关联的 Connection 实体读)
+            # 当前 backend 还没接凭据持久化, 暂时从环境变量取或用空 (会连不上, fallback)
+            import os
+            ssh_user = os.environ.get("H3C_DEFAULT_SSH_USER", "")
+            ssh_pass = os.environ.get("H3C_DEFAULT_SSH_PASS", "")
+            config_text = client.fetch_running_config()
+            addresses, services, policies = client.parse_config(config_text)
+            fw_cache = h3c_policies_to_fw_cache(addresses, services, policies)
+            analyzer = PrePushAnalyzer(fw_cache)
+            device_config_fetched = True
+            logger.info(
+                "PrePushAnalyzer: fetched %d rules, %d addrs from %s",
+                len(fw_cache.get("rules", [])),
+                len(fw_cache.get("addresses", [])),
+                fw.management_ip,
+            )
+        except Exception as e:
+            logger.warning(
+                "PrePushAnalyzer: fetch_device_config 失败 (%s), fallback 到 NEW_RULE",
+                e,
+            )
+            analyzer = PrePushAnalyzer({})
+            fetch_error = str(e)
+    else:
+        analyzer = PrePushAnalyzer({})
+
+    # 4. 对每条 raw_policy 做 6 要素分析, 累积 commands
+    commands: List[str] = []
+    policies_with_analysis: List[Dict[str, Any]] = []
+    stats_full_match = 0
+    stats_time_update = 0
+    stats_new_rule = 0
+
+    for raw in raw_policies:
+        # PrePushAnalyzer 用 device_source_zone/device_dest_zone/source_ip/dest_ip/service
+        analysis = analyzer.analyze_single_policy({
+            "device_source_zone": raw["src_zone"],
+            "device_dest_zone": raw["dst_zone"],
+            "source_ip": raw["src_ips"][0] if raw["src_ips"] else "",
+            "dest_ip": raw["dst_ips"][0] if raw["dst_ips"] else "",
+            "service": " ".join(raw["ports"]) if raw["ports"] else "",
+            "usage_time": raw["valid_until"] if raw["valid_until"] != "长期" else "",
+            "original_policy_id": raw["policy_id"],
+            "rule_name": raw["rule_name"],
+        })
+
+        if analysis["match_mode"] == "FULL_MATCH":
+            stats_full_match += 1
+            # FULL_MATCH: 跳过, 不累积 push_script
+        else:
+            commands.extend(analysis["push_script"])
+            if analysis["match_mode"] == "TIME_UPDATE":
+                stats_time_update += 1
+            else:
+                stats_new_rule += 1
+
+        policies_with_analysis.append({
+            **raw,
+            "match_mode": analysis["match_mode"],
+            "reused_rule_name": analysis["reused_rule_name"],
+            "reused_rule_content": analysis["reused_rule_content"],
+            "push_script": analysis["push_script"],
+            "audit_message": analysis["audit_message"],
+        })
+
+    # 5. NEW_RULE 的策略额外走 H3C generate_commands 拿 object/rule 完整命令
+    #    FULL_MATCH / TIME_UPDATE 的 push_script 已由 analyzer 给出, 不要再走 generate_commands
+    if stats_new_rule > 0:
+        try:
+            new_rule_policies = [
+                p for p in policies_with_analysis if p["match_mode"] == "NEW_RULE"
+            ]
+            extra_cmds = client.generate_commands(
+                new_policies=[
+                    {
+                        "policy_id": p["policy_id"],
+                        "rule_name": p["rule_name"],
+                        "src_ips": p["src_ips"],
+                        "dst_ips": p["dst_ips"],
+                        "ports": p["ports"],
+                        "valid_until": p["valid_until"],
+                        "src_zone": p["src_zone"],
+                        "dst_zone": p["dst_zone"],
+                        "action": p["action"],
+                    }
+                    for p in new_rule_policies
+                ],
+                existing_addresses=[],
+                existing_services=[],
+                existing_schedules=[],
+            )
+            commands.extend(extra_cmds)
+        except Exception as e:
+            logger.warning("generate_commands 失败 (NEW_RULE): %s", e)
 
     return {
         "success": True,
@@ -511,13 +617,19 @@ def generate_push_script(
         },
         "stats": {
             "total_order_policies": len(order.policies),
-            "to_push": len(new_policies),
+            "to_push": len(policies_with_analysis),
             "skipped": len(skipped),
             "commands": len(commands),
+            "full_match": stats_full_match,
+            "time_update": stats_time_update,
+            "new_rule": stats_new_rule,
         },
-        "new_policies": new_policies,
+        "policies": policies_with_analysis,  # 每条带 match_mode/audit_message/push_script
+        "new_policies": policies_with_analysis,  # 兼容旧字段 (前端 PushScriptModal 用)
         "commands": commands,
         "skipped": skipped,
+        "device_config_fetched": device_config_fetched,
+        "fetch_error": fetch_error,
     }
 
 

@@ -21,14 +21,14 @@ import {
   XCircle,
   Server,
   Hash,
-  ChevronDown,
-  ChevronRight,
   FileCode,
   Copy,
   Check,
   AlertCircle,
   Send,
   Loader2,
+  RotateCw,
+  Sparkles,
 } from 'lucide-react';
 import { Button } from '../components/ui/Button';
 import {
@@ -42,6 +42,10 @@ import { Badge } from '../components/ui/Badge';
 import { PushProgressBar } from '../components/push/PushProgressBar';
 import { PushLogViewer } from '../components/push/PushLogViewer';
 import {
+  PolicyMatchBadge,
+  type MatchMode,
+} from '../components/push/PolicyMatchBadge';
+import {
   useStartPushV2,
   useSnapshot,
   useSnapshotLogs,
@@ -52,6 +56,7 @@ import type {
   PreviewData,
   FirewallGroup,
   GenerateScriptResponse,
+  GenerateScriptNewPolicy,
 } from '../types/preview';
 
 export const Push = () => {
@@ -292,17 +297,23 @@ const FirewallPushCard = ({ orderId, group, mode }: FirewallPushCardProps) => {
   }, [snapshot]);
 
   // 加载 generate-script (按需)
-  const handleLoadScript = async () => {
-    if (scriptData) {
-      setScriptExpanded(!scriptExpanded);
+  // fetchMode: false = 本地 dry-run (NEW_RULE), true = 连墙拉配 (FULL_MATCH/TIME_UPDATE/NEW_RULE)
+  const [fetchMode, setFetchMode] = useState<'dry_run' | 'deep'>('dry_run');
+  const handleLoadScript = async (mode: 'dry_run' | 'deep' = 'dry_run') => {
+    // 同模式二次点击 → 折叠
+    if (scriptData && scriptExpanded && fetchMode === mode) {
+      setScriptExpanded(false);
       return;
     }
+    setFetchMode(mode);
     setScriptExpanded(true);
     setScriptLoading(true);
     setScriptError(null);
+    setScriptData(null);  // 强制重新 fetch (模式不同)
     try {
+      const fetchParam = mode === 'deep' ? '&fetch_device_config=True' : '';
       const res = await fetch(
-        `/api/push/orders/${orderId}/generate-script?firewall_id=${fw.id}`,
+        `/api/push/orders/${orderId}/generate-script?firewall_id=${fw.id}${fetchParam}`,
         { method: 'POST' },
       );
       if (!res.ok) {
@@ -424,121 +435,183 @@ const FirewallPushCard = ({ orderId, group, mode }: FirewallPushCardProps) => {
       </CardHeader>
       <CardContent className="space-y-3">
         {/* 当前模式提示 */}
-        <div className="text-xs text-muted-foreground flex items-center gap-2">
+        <div className="text-xs text-muted-foreground flex items-center gap-2 flex-wrap">
           <Hash className="h-3 w-3" />
-          当前模式:{' '}
-          <span className="font-mono font-semibold">{mode}</span>
+          推送模式: <span className="font-mono font-semibold">{mode}</span>
           {' · '}
-          注意: generate-script 是 dry-run (不连设备), 与实际 start-v2 推送语义可能不同
+          dry-run (NEW_RULE) 是本地生成, 连墙深度分析会触发 SSH 拉配
+        </div>
+
+        {/* 2 个脚本入口按钮 (toggle) */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <Button
+            variant={fetchMode === 'dry_run' && scriptExpanded ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => handleLoadScript('dry_run')}
+            data-testid={`script-toggle-dryrun-fw-${fw.id}`}
+            title="本地生成命令, 不连设备, 所有策略都判 NEW_RULE"
+          >
+            <FileCode className="mr-2 h-4 w-4" />
+            查看命令 (dry-run)
+          </Button>
+          <Button
+            variant={fetchMode === 'deep' && scriptExpanded ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => handleLoadScript('deep')}
+            data-testid={`script-toggle-deep-fw-${fw.id}`}
+            title="连墙拉配置, 走 PrePushAnalyzer 做 6 要素校验 (SSH 失败时 fallback)"
+          >
+            <Sparkles className="mr-2 h-4 w-4" />
+            深度分析 (连墙)
+          </Button>
+          {scriptData && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => handleLoadScript(fetchMode)}
+              title="重新拉取"
+            >
+              <RotateCw className="mr-2 h-4 w-4" />
+              刷新
+            </Button>
+          )}
         </div>
 
         {/* 命令预览 (折叠) */}
-        <div>
-          <button
-            onClick={handleLoadScript}
-            className="flex items-center gap-2 text-sm font-semibold text-slate-700 hover:text-slate-900"
-            data-testid={`script-toggle-fw-${fw.id}`}
-          >
-            {scriptExpanded ? (
-              <ChevronDown className="h-4 w-4" />
-            ) : (
-              <ChevronRight className="h-4 w-4" />
+        {scriptExpanded && (
+          <div className="mt-2 space-y-2 border rounded p-3 bg-slate-50/50">
+            {scriptLoading && (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground py-4">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                {fetchMode === 'deep' ? '正在连墙拉配置 + 6 要素分析...' : '正在生成脚本...'}
+              </div>
             )}
-            <FileCode className="h-4 w-4" />
-            查看即将推送的命令 (dry-run)
-          </button>
-
-          {scriptExpanded && (
-            <div className="mt-2 space-y-2">
-              {scriptLoading && (
-                <div className="flex items-center gap-2 text-sm text-muted-foreground py-4">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  正在生成脚本...
+            {scriptError && (
+              <div className="flex items-start gap-2 p-3 bg-red-50 border border-red-200 rounded text-red-700 text-sm">
+                <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+                <div>
+                  <div className="font-semibold">生成失败</div>
+                  <div>{scriptError}</div>
                 </div>
-              )}
-              {scriptError && (
-                <div className="flex items-start gap-2 p-3 bg-red-50 border border-red-200 rounded text-red-700 text-sm">
-                  <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
-                  <div>
-                    <div className="font-semibold">生成失败</div>
-                    <div>{scriptError}</div>
+              </div>
+            )}
+            {scriptData && (
+              <>
+                {/* 拉配状态提示 */}
+                {fetchMode === 'deep' && (
+                  <div
+                    className={`text-xs px-2 py-1 rounded ${
+                      scriptData.device_config_fetched
+                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                        : 'bg-yellow-50 text-yellow-700 border border-yellow-200'
+                    }`}
+                  >
+                    {scriptData.device_config_fetched
+                      ? '✓ 已连墙拉取真实配置, 6 要素分析基于设备现状'
+                      : `⚠ 连墙失败 (${scriptData.fetch_error || '未知错误'}), 所有策略 fallback 到 NEW_RULE`}
                   </div>
+                )}
+
+                {/* 6 卡片统计: full_match / time_update / new_rule + skipped / commands / total */}
+                <div className="grid grid-cols-3 md:grid-cols-6 gap-2">
+                  <MiniStat
+                    label="完全复用"
+                    value={scriptData.stats.full_match || 0}
+                    color="emerald"
+                  />
+                  <MiniStat
+                    label="时间联动"
+                    value={scriptData.stats.time_update || 0}
+                    color="amber"
+                  />
+                  <MiniStat
+                    label="全新建"
+                    value={scriptData.stats.new_rule || 0}
+                    color="slate"
+                  />
+                  <MiniStat
+                    label="工单策略"
+                    value={scriptData.stats.total_order_policies}
+                  />
+                  <MiniStat
+                    label="跳过"
+                    value={scriptData.stats.skipped}
+                    warn={scriptData.stats.skipped > 0}
+                  />
+                  <MiniStat
+                    label="命令条数"
+                    value={scriptData.stats.commands}
+                    highlight
+                  />
                 </div>
-              )}
-              {scriptData && (
-                <>
-                  {/* 4 卡片统计 */}
-                  <div className="grid grid-cols-4 gap-2">
-                    <MiniStat label="工单策略" value={scriptData.stats.total_order_policies} />
-                    <MiniStat
-                      label="可推送"
-                      value={scriptData.stats.to_push}
-                      highlight
-                    />
-                    <MiniStat
-                      label="跳过"
-                      value={scriptData.stats.skipped}
-                      warn={scriptData.stats.skipped > 0}
-                    />
-                    <MiniStat
-                      label="命令条数"
-                      value={scriptData.stats.commands}
-                      highlight
-                    />
-                  </div>
 
-                  {/* skipped 警告 */}
-                  {scriptData.skipped.length > 0 && (
-                    <div className="p-2 bg-orange-50 border border-orange-200 rounded text-xs">
-                      <div className="font-semibold text-orange-800 mb-1">
-                        跳过 {scriptData.skipped.length} 条
-                      </div>
-                      <ul className="text-orange-700 space-y-0.5 max-h-24 overflow-auto">
-                        {scriptData.skipped.map((s, i) => (
-                          <li key={i}>
-                            P{s.policy_id} {s.source_ip} → {s.dest_ip} — {s.reason}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-
-                  {/* 黑色终端命令 */}
+                {/* 策略明细: 每条带 match badge + 复用信息 + push_script */}
+                {(scriptData.policies || scriptData.new_policies || []).length > 0 && (
                   <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <div className="text-xs font-semibold text-slate-600">
-                        CLI 命令 ({scriptData.commands.length} 条)
-                      </div>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={handleCopy}
-                        disabled={!scriptData.commands.length}
-                      >
-                        {copied ? (
-                          <>
-                            <Check className="h-3 w-3 mr-1 text-green-600" />
-                            已复制
-                          </>
-                        ) : (
-                          <>
-                            <Copy className="h-3 w-3 mr-1" />
-                            复制
-                          </>
-                        )}
-                      </Button>
+                    <div className="text-sm font-semibold text-slate-700 mb-2 flex items-center gap-2">
+                      策略明细 ({(scriptData.policies || scriptData.new_policies || []).length} 条)
                     </div>
-                    <pre className="bg-slate-900 text-green-300 p-2 rounded font-mono text-xs leading-relaxed overflow-auto max-h-64 select-text">
-                      {scriptData.commands.length === 0
-                        ? '（无可生成命令）'
-                        : scriptData.commands.join('\n')}
-                    </pre>
+                    <div className="space-y-1.5">
+                      {(scriptData.policies || scriptData.new_policies || []).map(
+                        (pol, idx) => (
+                          <PolicyAnalysisRow key={idx} policy={pol} />
+                        ),
+                      )}
+                    </div>
                   </div>
-                </>
-              )}
-            </div>
-          )}
-        </div>
+                )}
+
+                {/* skipped 警告 */}
+                {scriptData.skipped.length > 0 && (
+                  <div className="p-2 bg-orange-50 border border-orange-200 rounded text-xs">
+                    <div className="font-semibold text-orange-800 mb-1">
+                      跳过 {scriptData.skipped.length} 条
+                    </div>
+                    <ul className="text-orange-700 space-y-0.5 max-h-24 overflow-auto">
+                      {scriptData.skipped.map((s, i) => (
+                        <li key={i}>
+                          P{s.policy_id} {s.source_ip} → {s.dest_ip} — {s.reason}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {/* 黑色终端命令 (总体) */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="text-xs font-semibold text-slate-600">
+                      完整 CLI 命令 ({scriptData.commands.length} 条)
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleCopy}
+                      disabled={!scriptData.commands.length}
+                    >
+                      {copied ? (
+                        <>
+                          <Check className="h-3 w-3 mr-1 text-green-600" />
+                          已复制
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="h-3 w-3 mr-1" />
+                          复制
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                  <pre className="bg-slate-900 text-green-300 p-2 rounded font-mono text-xs leading-relaxed overflow-auto max-h-64 select-text">
+                    {scriptData.commands.length === 0
+                      ? '（无可生成命令, 全部 FULL_MATCH 跳过）'
+                      : scriptData.commands.join('\n')}
+                  </pre>
+                </div>
+              </>
+            )}
+          </div>
+        )}
 
         {/* 推送中 / 完成: 进度 + 日志 */}
         {(pushing || completed) && snapshot && (
@@ -626,28 +699,133 @@ const MiniStat = ({
   value,
   highlight,
   warn,
+  color,
 }: {
   label: string;
   value: number;
   highlight?: boolean;
   warn?: boolean;
-}) => (
-  <div
-    className={`border rounded p-2 text-center ${
-      warn
-        ? 'border-orange-300 bg-orange-50'
-        : highlight
-        ? 'border-blue-300 bg-blue-50'
-        : 'border-slate-200'
-    }`}
-  >
-    <div className="text-xs text-muted-foreground">{label}</div>
-    <div
-      className={`text-xl font-bold ${
-        warn ? 'text-orange-700' : highlight ? 'text-blue-700' : 'text-slate-800'
-      }`}
-    >
-      {value}
+  color?: 'emerald' | 'amber' | 'slate';
+}) => {
+  // color prop 优先 (3 mode 用), 老 highlight/warn fallback
+  const bgColor = color === 'emerald'
+    ? 'border-emerald-300 bg-emerald-50'
+    : color === 'amber'
+    ? 'border-amber-300 bg-amber-50'
+    : color === 'slate'
+    ? 'border-slate-300 bg-slate-50'
+    : warn
+    ? 'border-orange-300 bg-orange-50'
+    : highlight
+    ? 'border-blue-300 bg-blue-50'
+    : 'border-slate-200';
+  const textColor = color === 'emerald'
+    ? 'text-emerald-700'
+    : color === 'amber'
+    ? 'text-amber-700'
+    : color === 'slate'
+    ? 'text-slate-700'
+    : warn ? 'text-orange-700' : highlight ? 'text-blue-700' : 'text-slate-800';
+  return (
+    <div className={`border rounded p-2 text-center ${bgColor}`}>
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className={`text-xl font-bold ${textColor}`}>{value}</div>
     </div>
-  </div>
-);
+  );
+};
+
+// =============================================================
+// PolicyAnalysisRow - 策略明细单行
+// =============================================================
+
+interface PolicyAnalysisRowProps {
+  policy: GenerateScriptNewPolicy;
+}
+
+const PolicyAnalysisRow = ({ policy }: PolicyAnalysisRowProps) => {
+  const [copied, setCopied] = useState(false);
+  const mode = (policy.match_mode || 'NEW_RULE') as MatchMode;
+  const script = policy.push_script || [];
+  const hasScript = script.length > 0;
+
+  const handleCopy = async () => {
+    if (!hasScript) return;
+    try {
+      await navigator.clipboard.writeText(script.join('\n'));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (e) {
+      toast.apiError(e, '复制失败');
+    }
+  };
+
+  // 边框颜色跟 match_mode 走
+  const borderClass = mode === 'FULL_MATCH'
+    ? 'border-l-4 border-l-emerald-500 border-emerald-200'
+    : mode === 'TIME_UPDATE'
+    ? 'border-l-4 border-l-amber-500 border-amber-200'
+    : 'border-l-4 border-l-slate-400 border-slate-200';
+
+  return (
+    <div
+      className={`bg-white rounded p-2 ${borderClass}`}
+      data-testid={`policy-row-${policy.policy_id}-${mode.toLowerCase()}`}
+    >
+      <div className="flex items-start justify-between gap-2 flex-wrap">
+        <div className="flex-1 min-w-0 space-y-1">
+          {/* match badge + rule_name + 概要 */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <PolicyMatchBadge mode={mode} ruleName={policy.reused_rule_name} size="sm" />
+            <span className="text-xs text-muted-foreground font-mono">
+              {policy.rule_name}
+            </span>
+            <span className="text-xs text-slate-600">
+              {policy.src_ips?.join(', ')} → {policy.dst_ips?.join(', ')}
+              {policy.ports?.length ? ` : ${policy.ports.join(' ')}` : ''}
+            </span>
+          </div>
+          {/* 复用信息 */}
+          {policy.reused_rule_content && (
+            <div className="text-xs text-slate-600 font-mono bg-slate-50 px-2 py-1 rounded">
+              <span className="font-semibold text-slate-700">复用:</span>{' '}
+              {policy.reused_rule_content}
+            </div>
+          )}
+          {/* audit_message */}
+          {policy.audit_message && (
+            <div className="text-xs text-slate-500 italic">
+              {policy.audit_message}
+            </div>
+          )}
+        </div>
+        {/* push_script 复制按钮 */}
+        {hasScript && (
+          <Button variant="outline" size="sm" onClick={handleCopy} className="flex-shrink-0">
+            {copied ? (
+              <>
+                <Check className="h-3 w-3 mr-1 text-green-600" />
+                已复制
+              </>
+            ) : (
+              <>
+                <Copy className="h-3 w-3 mr-1" />
+                复制脚本 ({script.length})
+              </>
+            )}
+          </Button>
+        )}
+      </div>
+      {/* push_script 文本域 */}
+      {hasScript && (
+        <pre className="mt-2 bg-slate-900 text-green-300 p-2 rounded font-mono text-xs leading-relaxed overflow-auto max-h-32 select-text">
+          {script.join('\n')}
+        </pre>
+      )}
+      {mode === 'FULL_MATCH' && !hasScript && (
+        <div className="mt-1 text-xs text-emerald-600 italic">
+          ✓ 各要素均已被包容, 无需下发任何命令
+        </div>
+      )}
+    </div>
+  );
+};
