@@ -451,9 +451,8 @@ def generate_push_script(
             p.source_ip or "",
             p.dest_ip or "",
             p.service or "",
-            p.action or "permit",
+            "permit",  # spec §1 删了 Policy.action, 固定 permit (对齐 chain_planner.py:202)
         )
-        print (p)
         for idx, sp in enumerate(single):
             if sp["not_pushed_reason"]:
                 skipped.append({
@@ -483,7 +482,7 @@ def generate_push_script(
                 "valid_until": _normalize_valid_until(usage_time_by_id.get(p.id, "长期")),
                 "src_zone": p.device_source_zone or "any",
                 "dst_zone": p.device_dest_zone or "any",
-                "action": p.action or "permit",
+                "action": "permit",  # spec §1 删了 Policy.action, 固定 permit (对齐 chain_planner.py:202)
             })
 
     # 4. 生成命令
