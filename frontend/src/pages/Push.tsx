@@ -12,7 +12,7 @@
  *   - 每面墙独立推送, 3 模式 Radio 全局共享 (顶部 1 份)
  *   - 不管哪个模式, 都展示 generate-script 命令预览 (按需 fetch)
  */
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft,
@@ -25,10 +25,13 @@ import {
   Copy,
   Check,
   AlertCircle,
+  AlertTriangle,
   Send,
   Loader2,
   RotateCw,
+  RotateCcw,
   Sparkles,
+  X,
 } from 'lucide-react';
 import { Button } from '../components/ui/Button';
 import {
@@ -64,8 +67,45 @@ export const Push = () => {
   const navigate = useNavigate();
   const oid = Number(orderId);
 
-  // 全局推送模式 (3 模式 Radio, 共享给所有墙)
-  const [mode, setMode] = useState<PushMode>('deduplicate');
+  // 推送模式: defaultMode 是顶部 Radio 设的全局默认,
+  // wallModeOverrides 是单墙覆盖 (无 key = 继承默认)
+  const [defaultMode, setDefaultMode] = useState<PushMode>('deduplicate');
+  const [wallModeOverrides, setWallModeOverrides] = useState<Record<number, PushMode>>({});
+
+  const setWallModeOverride = (fwId: number, mode: PushMode | null) => {
+    setWallModeOverrides((prev) => {
+      const next = { ...prev };
+      if (mode === null) delete next[fwId];
+      else next[fwId] = mode;
+      return next;
+    });
+  };
+
+  // 一键 dry-run 全部: 用 token 触发子组件 useEffect, 父组件只看完成数做进度
+  const [batchQueryTrigger, setBatchQueryTrigger] = useState(0);
+  const [batchQueryProgress, setBatchQueryProgress] = useState<{ done: number; total: number } | null>(null);
+
+  const handleBatchDryRun = () => {
+    const total = previewData?.firewall_groups.length ?? 0;
+    if (total === 0) {
+      toast.warning('没有可查询的防火墙');
+      return;
+    }
+    setBatchQueryProgress({ done: 0, total });
+    setBatchQueryTrigger((t) => t + 1);
+  };
+
+  const handleCardBatchDone = () => {
+    setBatchQueryProgress((prev) => (prev ? { ...prev, done: prev.done + 1 } : prev));
+  };
+
+  // batchQueryProgress 完成 → 1.5s 后自动清
+  useEffect(() => {
+    if (batchQueryProgress && batchQueryProgress.done >= batchQueryProgress.total) {
+      const timer = setTimeout(() => setBatchQueryProgress(null), 1500);
+      return () => clearTimeout(timer);
+    }
+  }, [batchQueryProgress]);
 
   // preview 数据
   const [previewData, setPreviewData] = useState<PreviewData | null>(null);
@@ -91,6 +131,76 @@ export const Push = () => {
       cancelled = true;
     };
   }, [oid]);
+
+  // 一键推送所有: 串行执行, 须每面墙都完成过 dry-run 才能开启
+  // dryRunCompleted: 跟踪哪些墙已成功加载过 dry-run 数据
+  const [dryRunCompleted, setDryRunCompleted] = useState<Set<number>>(new Set());
+  // batchPushTrigger: bump 触发新一轮批量推送
+  const [batchPushTrigger, setBatchPushTrigger] = useState(0);
+  // batchPushIndex: 当前正在推的墙在 firewall_groups 里的索引
+  const [batchPushIndex, setBatchPushIndex] = useState(0);
+  // batchPushProgress: 推送进度显示
+  const [batchPushProgress, setBatchPushProgress] = useState<{
+    done: number;
+    total: number;
+    currentFwName?: string;
+  } | null>(null);
+  // showBatchPushModal: 自定义 Modal 显隐
+  const [showBatchPushModal, setShowBatchPushModal] = useState(false);
+
+  const fwIds: number[] =
+    previewData?.firewall_groups.map((g) => g.firewall.id) ?? [];
+
+  const handleCardDryRunLoaded = (fwId: number) => {
+    setDryRunCompleted((prev) => {
+      if (prev.has(fwId)) return prev;
+      const next = new Set(prev);
+      next.add(fwId);
+      return next;
+    });
+  };
+
+  const handleCardBatchPushStart = (fwName: string) => {
+    setBatchPushProgress((prev) => (prev ? { ...prev, currentFwName: fwName } : prev));
+  };
+
+  const handleCardBatchPushDone = () => {
+    setBatchPushProgress((prev) =>
+      prev ? { ...prev, done: prev.done + 1, currentFwName: undefined } : prev,
+    );
+    setBatchPushIndex((i) => i + 1);
+  };
+
+  const handleOpenBatchPushModal = () => {
+    const total = fwIds.length;
+    if (total === 0) {
+      toast.warning('没有可推送的防火墙');
+      return;
+    }
+    const notReady = fwIds.filter((id) => !dryRunCompleted.has(id));
+    if (notReady.length > 0) {
+      toast.warning(
+        `还有 ${notReady.length} 面墙未完成 dry-run, 请先点击"一键查询所有墙"加载命令`,
+      );
+      return;
+    }
+    setShowBatchPushModal(true);
+  };
+
+  const handleConfirmBatchPush = () => {
+    setShowBatchPushModal(false);
+    setBatchPushProgress({ done: 0, total: fwIds.length });
+    setBatchPushIndex(0);
+    setBatchPushTrigger((t) => t + 1);
+  };
+
+  // batchPushProgress 完成 → 1.5s 后自动清
+  useEffect(() => {
+    if (batchPushProgress && batchPushProgress.done >= batchPushProgress.total) {
+      const timer = setTimeout(() => setBatchPushProgress(null), 1500);
+      return () => clearTimeout(timer);
+    }
+  }, [batchPushProgress]);
 
   if (loadingPreview) {
     return (
@@ -131,40 +241,97 @@ export const Push = () => {
         </Button>
       </div>
 
-      {/* 顶部全局: 3 模式 Radio (适用于所有墙) */}
+      {/* 顶部全局: 默认推送模式 (单墙可单独覆盖) */}
       <Card>
         <CardHeader>
           <CardTitle className="text-base flex items-center gap-2">
             <Hash className="h-4 w-4" />
-            推送模式 (适用于所有墙)
+            默认推送模式 (所有墙未单独设置时使用)
           </CardTitle>
           <CardDescription>
-            选好后, 每面墙的"推送到这面墙"按钮会用这个模式调用 start-v2
+            单墙可在本墙 Card 顶部单独覆盖该默认; 覆盖后顶部切换不影响已覆盖的墙
           </CardDescription>
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
             <ModeRadio
-              current={mode}
+              current={defaultMode}
               value="deduplicate"
               title="查重模式"
               desc="复用整条已存在策略，对象不重用才新建"
-              onChange={setMode}
+              onChange={setDefaultMode}
             />
             <ModeRadio
-              current={mode}
+              current={defaultMode}
               value="force_push"
               title="全推模式"
               desc="对象与策略全错开新建（强制落盘）"
-              onChange={setMode}
+              onChange={setDefaultMode}
             />
             <ModeRadio
-              current={mode}
+              current={defaultMode}
               value="reuse_objects"
               title="对象复用模式"
               desc="复用相同 IP/端口组，策略行新建"
-              onChange={setMode}
+              onChange={setDefaultMode}
             />
+          </div>
+          <div className="mt-3 pt-3 border-t flex items-center gap-3 flex-wrap text-xs">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleBatchDryRun}
+              disabled={
+                !previewData ||
+                previewData.firewall_groups.length === 0 ||
+                (batchQueryProgress !== null && batchQueryProgress.done < batchQueryProgress.total) ||
+                (batchPushProgress !== null && batchPushProgress.done < batchPushProgress.total)
+              }
+              data-testid="batch-dryrun-all"
+              title="对所有墙并发触发 dry-run (不连设备), 串行执行避免 SSH 资源争用"
+            >
+              <FileCode className="mr-2 h-4 w-4" />
+              一键查询所有墙 (dry-run)
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleOpenBatchPushModal}
+              disabled={
+                !previewData ||
+                previewData.firewall_groups.length === 0 ||
+                (batchPushProgress !== null && batchPushProgress.done < batchPushProgress.total) ||
+                fwIds.some((id) => !dryRunCompleted.has(id))
+              }
+              data-testid="batch-push-all"
+              title={
+                fwIds.some((id) => !dryRunCompleted.has(id))
+                  ? '必须先对每面墙完成一次 dry-run 才能批量推送'
+                  : '对所有墙串行启动推送 (按防火墙_groups 顺序)'
+              }
+            >
+              <Play className="mr-2 h-4 w-4" />
+              一键推送所有墙
+            </Button>
+            {batchQueryProgress && (
+              <span className="text-muted-foreground">
+                查询进度:{' '}
+                <span className="font-mono font-semibold text-slate-700">
+                  {batchQueryProgress.done} / {batchQueryProgress.total}
+                </span>
+              </span>
+            )}
+            {batchPushProgress && (
+              <span className="text-muted-foreground">
+                推送进度:{' '}
+                <span className="font-mono font-semibold text-slate-700">
+                  {batchPushProgress.done} / {batchPushProgress.total}
+                </span>
+                {batchPushProgress.currentFwName && (
+                  <span className="ml-2">· 当前: {batchPushProgress.currentFwName}</span>
+                )}
+              </span>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -177,14 +344,32 @@ export const Push = () => {
           </CardContent>
         </Card>
       ) : (
-        previewData.firewall_groups.map((group) => (
-          <FirewallPushCard
-            key={group.firewall.id}
-            orderId={oid}
-            group={group}
-            mode={mode}
-          />
-        ))
+        previewData.firewall_groups.map((group) => {
+          const fw = group.firewall;
+          const effectiveMode = wallModeOverrides[fw.id] ?? defaultMode;
+          return (
+            <FirewallPushCard
+              key={fw.id}
+              orderId={oid}
+              group={group}
+              defaultMode={defaultMode}
+              effectiveMode={effectiveMode}
+              wallOverride={wallModeOverrides[fw.id] ?? null}
+              onSetOverride={(m) => setWallModeOverride(fw.id, m)}
+              batchQueryTrigger={batchQueryTrigger}
+              onBatchQueryComplete={handleCardBatchDone}
+              batchPushTrigger={batchPushTrigger}
+              batchPushTargetFwId={
+                batchPushProgress !== null && batchPushProgress.done < batchPushProgress.total
+                  ? fwIds[batchPushIndex] ?? null
+                  : null
+              }
+              onDryRunLoaded={handleCardDryRunLoaded}
+              onBatchPushStart={handleCardBatchPushStart}
+              onBatchPushDone={handleCardBatchPushDone}
+            />
+          );
+        })
       )}
 
       {/* 未匹配的策略 (提示一下, 但不推送) */}
@@ -216,6 +401,17 @@ export const Push = () => {
             </ul>
           </CardContent>
         </Card>
+      )}
+
+      {/* 一键推送确认 Modal */}
+      {showBatchPushModal && (
+        <BatchPushConfirmModal
+          previewData={previewData}
+          defaultMode={defaultMode}
+          wallModeOverrides={wallModeOverrides}
+          onConfirm={handleConfirmBatchPush}
+          onCancel={() => setShowBatchPushModal(false)}
+        />
       )}
     </div>
   );
@@ -255,10 +451,40 @@ const ModeRadio = ({ current, value, title, desc, onChange }: ModeRadioProps) =>
 interface FirewallPushCardProps {
   orderId: number;
   group: FirewallGroup;
-  mode: PushMode;
+  defaultMode: PushMode;
+  effectiveMode: PushMode;
+  wallOverride: PushMode | null;
+  onSetOverride: (mode: PushMode | null) => void;
+  batchQueryTrigger: number;
+  onBatchQueryComplete: () => void;
+  batchPushTrigger: number;
+  batchPushTargetFwId: number | null;
+  onDryRunLoaded: (fwId: number) => void;
+  onBatchPushStart: (fwName: string) => void;
+  onBatchPushDone: () => void;
 }
 
-const FirewallPushCard = ({ orderId, group, mode }: FirewallPushCardProps) => {
+const MODE_LABEL: Record<PushMode, string> = {
+  deduplicate: '查重',
+  force_push: '全推',
+  reuse_objects: '对象复用',
+};
+
+const FirewallPushCard = ({
+  orderId,
+  group,
+  defaultMode,
+  effectiveMode,
+  wallOverride,
+  onSetOverride,
+  batchQueryTrigger,
+  onBatchQueryComplete,
+  batchPushTrigger,
+  batchPushTargetFwId,
+  onDryRunLoaded,
+  onBatchPushStart,
+  onBatchPushDone,
+}: FirewallPushCardProps) => {
   const fw = group.firewall;
   const startPushMutation = useStartPushV2(orderId);
 
@@ -296,12 +522,39 @@ const FirewallPushCard = ({ orderId, group, mode }: FirewallPushCardProps) => {
     }
   }, [snapshot]);
 
+  // 批量 dry-run trigger 监听: 父组件 bump token → 本卡 force 加载
+  const lastBatchTriggerProcessed = useRef(0);
+  useEffect(() => {
+    if (batchQueryTrigger === 0) return;
+    if (batchQueryTrigger === lastBatchTriggerProcessed.current) return;
+    lastBatchTriggerProcessed.current = batchQueryTrigger;
+    void handleLoadScript('dry_run', { force: true }).then(() => onBatchQueryComplete());
+  }, [batchQueryTrigger]);
+
+  // 批量推送 trigger 监听: 父组件 bump token + 目标 fwId 匹配 → 本卡启动推送
+  const lastBatchPushTriggerProcessed = useRef(0);
+  useEffect(() => {
+    if (batchPushTrigger === 0) return;
+    if (batchPushTrigger === lastBatchPushTriggerProcessed.current) return;
+    if (batchPushTargetFwId === null) return;
+    if (batchPushTargetFwId !== fw.id) return;
+    lastBatchPushTriggerProcessed.current = batchPushTrigger;
+    onBatchPushStart(fw.name);
+    void handleStart().then(() => onBatchPushDone());
+  }, [batchPushTrigger, batchPushTargetFwId]);
+
   // 加载 generate-script (按需)
   // fetchMode: false = 本地 dry-run (NEW_RULE), true = 连墙拉配 (FULL_MATCH/TIME_UPDATE/NEW_RULE)
   const [fetchMode, setFetchMode] = useState<'dry_run' | 'deep'>('dry_run');
-  const handleLoadScript = async (mode: 'dry_run' | 'deep' = 'dry_run') => {
-    // 同模式二次点击 → 折叠
-    if (scriptData && scriptExpanded && fetchMode === mode) {
+  const handleLoadScript = async (
+    mode: 'dry_run' | 'deep' = 'dry_run',
+    options?: { force?: boolean },
+  ) => {
+    // 同模式二次点击 → 折叠 (force 模式下跳过, 一键查询时强制刷新)
+    if (
+      !options?.force &&
+      scriptData && scriptExpanded && fetchMode === mode
+    ) {
       setScriptExpanded(false);
       return;
     }
@@ -309,23 +562,26 @@ const FirewallPushCard = ({ orderId, group, mode }: FirewallPushCardProps) => {
     setScriptExpanded(true);
     setScriptLoading(true);
     setScriptError(null);
-    setScriptData(null);  // 强制重新 fetch (模式不同)
+    setScriptData(null);
     try {
       const fetchParam = mode === 'deep' ? '&fetch_device_config=True' : '';
       const res = await fetch(
         `/api/push/orders/${orderId}/generate-script?firewall_id=${fw.id}${fetchParam}`,
-        { method: 'POST' },
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        },
       );
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body?.detail || `HTTP ${res.status}`);
-      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as GenerateScriptResponse;
       setScriptData(data);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : '加载失败';
+      // dry-run 成功 → 报告父组件 (用于"一键推送"前置条件校验)
+      if (mode === 'dry_run') onDryRunLoaded(fw.id);
+    } catch (e: any) {
+      const msg = e?.message || String(e);
       setScriptError(msg);
-      toast.apiError(e, '生成命令失败');
+      toast.apiError(e, '生成脚本失败');
     } finally {
       setScriptLoading(false);
     }
@@ -355,7 +611,7 @@ const FirewallPushCard = ({ orderId, group, mode }: FirewallPushCardProps) => {
     try {
       const result = await startPushMutation.mutateAsync({
         firewallId: fw.id,
-        mode,
+        mode: effectiveMode,
       });
       if (result.snapshot_id) {
         setSnapshotId(result.snapshot_id);
@@ -434,15 +690,48 @@ const FirewallPushCard = ({ orderId, group, mode }: FirewallPushCardProps) => {
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
+        {/* 本墙模式覆盖 (默认继承 defaultMode) */}
+        <div className="flex items-center gap-2 flex-wrap text-xs">
+          <span className="text-muted-foreground">本墙模式:</span>
+          <select
+            value={wallOverride ?? '__inherit__'}
+            onChange={(e) => {
+              const v = e.target.value;
+              onSetOverride(v === '__inherit__' ? null : (v as PushMode));
+            }}
+            data-testid={`wall-mode-select-fw-${fw.id}`}
+            className="border rounded px-2 py-1 bg-white"
+          >
+            <option value="__inherit__">继承默认 ({MODE_LABEL[defaultMode]})</option>
+            <option value="deduplicate">查重模式</option>
+            <option value="force_push">全推模式</option>
+            <option value="reuse_objects">对象复用模式</option>
+          </select>
+          {wallOverride && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => onSetOverride(null)}
+              data-testid={`wall-mode-reset-fw-${fw.id}`}
+            >
+              <RotateCcw className="h-3 w-3 mr-1" />
+              重置为默认
+            </Button>
+          )}
+          {wallOverride && (
+            <span className="text-amber-600">已覆盖默认</span>
+          )}
+        </div>
+
         {/* 当前模式提示 */}
         <div className="text-xs text-muted-foreground flex items-center gap-2 flex-wrap">
           <Hash className="h-3 w-3" />
-          推送模式: <span className="font-mono font-semibold">{mode}</span>
+          推送模式: <span className="font-mono font-semibold">{effectiveMode}</span>
           {' · '}
-          dry-run (NEW_RULE) 是本地生成, 连墙深度分析会触发 SSH 拉配
+          dry-run 是本地生成{effectiveMode === 'force_push' ? '' : ', 连墙深度分析会触发 SSH 拉配'}
         </div>
 
-        {/* 2 个脚本入口按钮 (toggle) */}
+        {/* 脚本入口按钮 (dry-run 总是可见; 深度分析在 force_push 模式下隐藏) */}
         <div className="flex items-center gap-2 flex-wrap">
           <Button
             variant={fetchMode === 'dry_run' && scriptExpanded ? 'default' : 'outline'}
@@ -454,16 +743,18 @@ const FirewallPushCard = ({ orderId, group, mode }: FirewallPushCardProps) => {
             <FileCode className="mr-2 h-4 w-4" />
             查看命令 (dry-run)
           </Button>
-          <Button
-            variant={fetchMode === 'deep' && scriptExpanded ? 'default' : 'outline'}
-            size="sm"
-            onClick={() => handleLoadScript('deep')}
-            data-testid={`script-toggle-deep-fw-${fw.id}`}
-            title="连墙拉配置, 走 PrePushAnalyzer 做 6 要素校验 (SSH 失败时 fallback)"
-          >
-            <Sparkles className="mr-2 h-4 w-4" />
-            深度分析 (连墙)
-          </Button>
+          {effectiveMode !== 'force_push' && (
+            <Button
+              variant={fetchMode === 'deep' && scriptExpanded ? 'default' : 'outline'}
+              size="sm"
+              onClick={() => handleLoadScript('deep')}
+              data-testid={`script-toggle-deep-fw-${fw.id}`}
+              title="连墙拉配置, 走 PrePushAnalyzer 做 6 要素校验 (SSH 失败时 fallback)"
+            >
+              <Sparkles className="mr-2 h-4 w-4" />
+              深度分析 (连墙)
+            </Button>
+          )}
           {scriptData && (
             <Button
               variant="ghost"
@@ -546,21 +837,33 @@ const FirewallPushCard = ({ orderId, group, mode }: FirewallPushCardProps) => {
                   />
                 </div>
 
-                {/* 策略明细: 每条带 match badge + 复用信息 + push_script */}
-                {(scriptData.policies || scriptData.new_policies || []).length > 0 && (
-                  <div>
-                    <div className="text-sm font-semibold text-slate-700 mb-2 flex items-center gap-2">
-                      策略明细 ({(scriptData.policies || scriptData.new_policies || []).length} 条)
-                    </div>
-                    <div className="space-y-1.5">
-                      {(scriptData.policies || scriptData.new_policies || []).map(
-                        (pol, idx) => (
+                {/* 策略明细: 只显示复用的 (FULL_MATCH + TIME_UPDATE),
+                    全新建 (NEW_RULE) 不展示, 实际命令在下方 "完整 CLI 命令" 块统一看 */}
+                {(() => {
+                  const allPolicies = scriptData.policies || scriptData.new_policies || [];
+                  // 过滤: 复用类 (FULL_MATCH 完全复用, TIME_UPDATE 时间联动复用)
+                  const reusedPolicies = allPolicies.filter(
+                    (p) => p.match_mode !== 'NEW_RULE',
+                  );
+                  const newRuleCount = allPolicies.length - reusedPolicies.length;
+                  return (
+                    <div>
+                      <div className="text-sm font-semibold text-slate-700 mb-2 flex items-center gap-2">
+                        复用策略明细 ({reusedPolicies.length} 条)
+                        {newRuleCount > 0 && (
+                          <span className="text-xs text-muted-foreground font-normal">
+                            · 另 {newRuleCount} 条全新建策略不展示
+                          </span>
+                        )}
+                      </div>
+                      <div className="space-y-1.5">
+                        {reusedPolicies.map((pol, idx) => (
                           <PolicyAnalysisRow key={idx} policy={pol} />
-                        ),
-                      )}
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                )}
+                  );
+                })()}
 
                 {/* skipped 警告 */}
                 {scriptData.skipped.length > 0 && (
@@ -625,7 +928,7 @@ const FirewallPushCard = ({ orderId, group, mode }: FirewallPushCardProps) => {
               progress={progress}
               isProcessing={pushing}
             />
-            {/* 模式提示 (跟 start-v2 用的 mode 一致) */}
+            {/* 模式提示 (跟 start-v2 用的 effectiveMode 一致) */}
             <div className="text-xs text-muted-foreground">
               模式: <span className="font-mono">{snapshot.push_mode}</span> · 批次:{' '}
               <span className="font-mono">
@@ -865,21 +1168,11 @@ interface PolicyAnalysisRowProps {
 }
 
 const PolicyAnalysisRow = ({ policy }: PolicyAnalysisRowProps) => {
-  const [copied, setCopied] = useState(false);
+  // 命令本身在墙级 "完整 CLI 命令" 块统一展示, 这里只展示复用相关匹配信息
+  // (NEW_RULE 已在策略明细区被过滤掉, 这里只剩 FULL_MATCH / TIME_UPDATE)
   const mode = (policy.match_mode || 'NEW_RULE') as MatchMode;
   const script = policy.push_script || [];
-  const hasScript = script.length > 0;
-
-  const handleCopy = async () => {
-    if (!hasScript) return;
-    try {
-      await navigator.clipboard.writeText(script.join('\n'));
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch (e) {
-      toast.apiError(e, '复制失败');
-    }
-  };
+  const scriptCommandCount = script.length; // 仅供参考 (用户去墙级块复制命令)
 
   // 边框颜色跟 match_mode 走
   const borderClass = mode === 'FULL_MATCH'
@@ -893,7 +1186,7 @@ const PolicyAnalysisRow = ({ policy }: PolicyAnalysisRowProps) => {
       className={`bg-white rounded p-2 ${borderClass}`}
       data-testid={`policy-row-${policy.policy_id}-${mode.toLowerCase()}`}
     >
-      <div className="flex items-start justify-between gap-2 flex-wrap">
+      <div className="flex items-start gap-2 flex-wrap">
         <div className="flex-1 min-w-0 space-y-1">
           {/* match badge + rule_name + 概要 */}
           <div className="flex items-center gap-2 flex-wrap">
@@ -919,35 +1212,136 @@ const PolicyAnalysisRow = ({ policy }: PolicyAnalysisRowProps) => {
               {policy.audit_message}
             </div>
           )}
+          {/* 命令条数提示 (墙视角, 实际命令在下方 "完整 CLI 命令" 块) */}
+          {scriptCommandCount > 0 && (
+            <div className="text-xs text-muted-foreground">
+              → 将生成 <span className="font-mono font-semibold">{scriptCommandCount}</span> 条命令
+            </div>
+          )}
         </div>
-        {/* push_script 复制按钮 */}
-        {hasScript && (
-          <Button variant="outline" size="sm" onClick={handleCopy} className="flex-shrink-0">
-            {copied ? (
-              <>
-                <Check className="h-3 w-3 mr-1 text-green-600" />
-                已复制
-              </>
-            ) : (
-              <>
-                <Copy className="h-3 w-3 mr-1" />
-                复制脚本 ({script.length})
-              </>
-            )}
-          </Button>
-        )}
       </div>
-      {/* push_script 文本域 */}
-      {hasScript && (
-        <pre className="mt-2 bg-slate-900 text-green-300 p-2 rounded font-mono text-xs leading-relaxed overflow-auto max-h-32 select-text">
-          {script.join('\n')}
-        </pre>
-      )}
-      {mode === 'FULL_MATCH' && !hasScript && (
-        <div className="mt-1 text-xs text-emerald-600 italic">
-          ✓ 各要素均已被包容, 无需下发任何命令
+    </div>
+  );
+};
+
+
+// =============================================================
+// BatchPushConfirmModal - 一键推送确认弹窗
+// =============================================================
+
+interface BatchPushConfirmModalProps {
+  previewData: PreviewData;
+  defaultMode: PushMode;
+  wallModeOverrides: Record<number, PushMode>;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
+const BatchPushConfirmModal = ({
+  previewData,
+  defaultMode,
+  wallModeOverrides,
+  onConfirm,
+  onCancel,
+}: BatchPushConfirmModalProps) => {
+  // ESC 关闭
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onCancel();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onCancel]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      onClick={onCancel}
+      data-testid="batch-push-confirm-modal"
+    >
+      <div
+        className="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-3 border-b">
+          <div className="flex items-center gap-2">
+            <Play className="h-5 w-5 text-slate-600" />
+            <h2 className="text-lg font-semibold">确认批量推送</h2>
+          </div>
+          <Button variant="ghost" size="icon" onClick={onCancel} aria-label="关闭">
+            <X className="h-5 w-5" />
+          </Button>
         </div>
-      )}
+
+        {/* Body */}
+        <div className="flex-1 overflow-auto px-5 py-4 space-y-3">
+          <div className="flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded text-amber-700 text-sm">
+            <AlertTriangle className="h-5 w-5 flex-shrink-0 mt-0.5" />
+            <div>
+              <div className="font-semibold">即将串行推送到 {previewData.firewall_groups.length} 面墙</div>
+              <div className="text-xs mt-1">
+                推送按 firewall_groups 顺序执行 (前一面完成 SSH + 落库后开始下一面), 单墙失败不中断后续墙。
+                dry-run 命令已在每面墙的折叠区查看过。
+              </div>
+            </div>
+          </div>
+
+          <div className="border rounded overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-100">
+                <tr>
+                  <th className="px-3 py-2 text-left font-medium">防火墙</th>
+                  <th className="px-3 py-2 text-left font-medium">管理 IP</th>
+                  <th className="px-3 py-2 text-left font-medium">模式</th>
+                  <th className="px-3 py-2 text-right font-medium">策略数</th>
+                </tr>
+              </thead>
+              <tbody>
+                {previewData.firewall_groups.map((g) => {
+                  const fw = g.firewall;
+                  const mode = wallModeOverrides[fw.id] ?? defaultMode;
+                  const overridden = wallModeOverrides[fw.id] != null;
+                  return (
+                    <tr key={fw.id} className="border-t">
+                      <td className="px-3 py-2">
+                        <div className="flex items-center gap-2">
+                          <Server className="h-3 w-3 text-slate-400" />
+                          <span className="font-mono text-xs">{fw.name}</span>
+                          {overridden && (
+                            <span className="text-amber-600 text-xs">(已覆盖默认)</span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 font-mono text-xs text-slate-600">
+                        {fw.management_ip}
+                      </td>
+                      <td className="px-3 py-2 font-mono text-xs">{mode}</td>
+                      <td className="px-3 py-2 text-right font-mono">
+                        {g.policies.length}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-end gap-2 px-5 py-3 border-t bg-slate-50">
+          <Button variant="outline" onClick={onCancel}>
+            取消
+          </Button>
+          <Button
+            onClick={onConfirm}
+            data-testid="batch-push-confirm-btn"
+          >
+            <Play className="mr-2 h-4 w-4" />
+            确认推送 {previewData.firewall_groups.length} 面墙
+          </Button>
+        </div>
+      </div>
     </div>
   );
 };
