@@ -392,7 +392,6 @@ class PrePushAnalyzer:
         dst_ip = req.get("dest_ip") or "any"
         service = req.get("service") or "any"
         return [
-            f"# 全新建策略: src={src_ip} dst={dst_ip} svc={service}",
             "security-policy ip",
             f" rule name {req.get('rule_name', 'AUTO_NEW_RULE')}",
             f"  source-zone {req.get('device_source_zone', 'any')}",
