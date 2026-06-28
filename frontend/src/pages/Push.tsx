@@ -53,7 +53,7 @@ import {
   useSnapshot,
   useSnapshotLogs,
 } from '../hooks/usePush';
-import type { PushMode, PushLogsResponse } from '../lib/api';
+import { getPushTasks, type PushMode, type PushLogsResponse } from '../lib/api';
 import { toast } from '../lib/toast';
 import type {
   PreviewData,
@@ -61,6 +61,30 @@ import type {
   GenerateScriptResponse,
   GenerateScriptNewPolicy,
 } from '../types/preview';
+
+// 复制到剪贴板 (含非安全上下文 fallback)
+// 非安全上下文 (HTTP 非 localhost / 内嵌 iframe) 时 navigator.clipboard 是 undefined
+// 这种环境下用隐藏 textarea + execCommand('copy') 兼容
+async function copyToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.top = '0';
+  ta.style.left = '-9999px';
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  try {
+    const ok = document.execCommand('copy');
+    if (!ok) throw new Error('execCommand 复制失败');
+  } finally {
+    document.body.removeChild(ta);
+  }
+}
 
 export const Push = () => {
   const { orderId } = useParams<{ orderId: string }>();
@@ -107,22 +131,22 @@ export const Push = () => {
     }
   }, [batchQueryProgress]);
 
-  // preview 数据
+  // (2026-06-28) 改为调用 /api/push/orders/<id>/tasks (物理 Policy 表 + pending 过滤)
+  // 替换原本的 /api/workorders/<id>/preview (Execution Plan 快照)
+  // helper 在 api.ts 里做字段适配, 返回 PreviewData 兼容 shape, 下游代码不变
   const [previewData, setPreviewData] = useState<PreviewData | null>(null);
   const [loadingPreview, setLoadingPreview] = useState(true);
 
-  // 拉 preview
+  // 拉 tasks (Push 页进入时)
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         setLoadingPreview(true);
-        const res = await fetch(`/api/workorders/${oid}/preview`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = (await res.json()) as PreviewData;
+        const data = await getPushTasks(oid);
         if (!cancelled) setPreviewData(data);
       } catch (e) {
-        if (!cancelled) toast.apiError(e, '加载预览数据失败');
+        if (!cancelled) toast.apiError(e, '加载推送任务失败');
       } finally {
         if (!cancelled) setLoadingPreview(false);
       }
@@ -587,11 +611,11 @@ const FirewallPushCard = ({
     }
   };
 
-  // 复制命令
+  // 复制命令 (折叠区内的内联按钮) — 用 copyToClipboard helper 处理非安全上下文
   const handleCopy = async () => {
     if (!scriptData?.commands?.length) return;
     try {
-      await navigator.clipboard.writeText(scriptData.commands.join('\n'));
+      await copyToClipboard(scriptData.commands.join('\n'));
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch (e) {
