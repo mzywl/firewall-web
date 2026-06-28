@@ -20,6 +20,8 @@ const makeNATInfo = (over: Partial<NATInfo> = {}): NATInfo => ({
 })
 
 const makePolicy = (over: Partial<PreviewPolicy> = {}): PreviewPolicy => ({
+  row_uuid: 'uuid-1',          // Execution Plan (2026-06-28): 后端 uuid.uuid4()
+  is_ignored: false,           // Execution Plan: 软删除标记, 默认 false
   id: 1,
   sequence: 1,
   source_zone: '业务A',
@@ -32,7 +34,7 @@ const makePolicy = (over: Partial<PreviewPolicy> = {}): PreviewPolicy => ({
   nat_policies: [],
   使用时间: '长期',
   ...over,
-})
+});
 
 const makeGroup = (over: Partial<FirewallGroup> = {}): FirewallGroup => ({
   firewall: {
@@ -209,24 +211,66 @@ describe('FirewallPolicyTable', () => {
     expect(container.textContent).toContain('\u00A0')
   })
 
-  it('C4: 渲染删除按钮当 onDeletePolicy 传入', () => {
-    const onDelete = vi.fn()
-    const policy = makePolicy({ id: 42 })
+  it('C4/C9: 渲染删除按钮当 onToggleIgnore 传入 + is_ignored=false', () => {
+    const onToggle = vi.fn()
+    const policy = makePolicy({ row_uuid: 'uuid-42', is_ignored: false })
     render(
       <FirewallPolicyTable
         group={makeGroup({ policies: [policy] })}
-        onDeletePolicy={onDelete}
+        onToggleIgnore={onToggle}
       />
     )
-    const btn = screen.getByTestId('delete-policy-42')
+    // 删除按钮 (红, Trash2) — 用 row_uuid 寻址
+    const btn = screen.getByTestId('delete-policy-uuid-42')
     expect(btn).toBeInTheDocument()
     fireEvent.click(btn)
-    expect(onDelete).toHaveBeenCalledWith(policy)
+    // 第二个参数是 currentIgnoreStatus, 调用方拿到后自己做反转
+    expect(onToggle).toHaveBeenCalledWith('uuid-42', false)
   })
 
-  it('C4: 不渲染删除按钮当 onDeletePolicy 缺省 (只读模式)', () => {
-    const policy = makePolicy({ id: 99 })
+  it('C9: 不渲染任何操作按钮当 onToggleIgnore 缺省 (只读模式)', () => {
+    const policy = makePolicy({ row_uuid: 'uuid-99' })
     render(<FirewallPolicyTable group={makeGroup({ policies: [policy] })} />)
-    expect(screen.queryByTestId('delete-policy-99')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('delete-policy-uuid-99')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('restore-policy-uuid-99')).not.toBeInTheDocument()
+  })
+
+  it('C9: is_ignored=true 时渲染恢复按钮 (蓝, Undo2), 不是删除按钮', () => {
+    const onToggle = vi.fn()
+    const policy = makePolicy({ row_uuid: 'uuid-ignored', is_ignored: true })
+    render(
+      <FirewallPolicyTable
+        group={makeGroup({ policies: [policy] })}
+        onToggleIgnore={onToggle}
+      />
+    )
+    // 恢复按钮存在
+    const restoreBtn = screen.getByTestId('restore-policy-uuid-ignored')
+    expect(restoreBtn).toBeInTheDocument()
+    // 删除按钮不存在
+    expect(screen.queryByTestId('delete-policy-uuid-ignored')).not.toBeInTheDocument()
+    fireEvent.click(restoreBtn)
+    expect(onToggle).toHaveBeenCalledWith('uuid-ignored', true)
+  })
+
+  it('C9: is_ignored=true 时行 className 含 opacity-50 bg-gray-50', () => {
+    const policy = makePolicy({ row_uuid: 'uuid-g', is_ignored: true })
+    const { container } = render(
+      <FirewallPolicyTable group={makeGroup({ policies: [policy] })} />
+    )
+    const tr = container.querySelector('tbody tr')
+    expect(tr).not.toBeNull()
+    expect(tr!.className).toContain('opacity-50')
+    expect(tr!.className).toContain('bg-gray-50')
+  })
+
+  it('C9: is_ignored=false 时行 className 不含 opacity-50', () => {
+    const policy = makePolicy({ row_uuid: 'uuid-n', is_ignored: false })
+    const { container } = render(
+      <FirewallPolicyTable group={makeGroup({ policies: [policy] })} />
+    )
+    const tr = container.querySelector('tbody tr')
+    expect(tr).not.toBeNull()
+    expect(tr!.className).not.toContain('opacity-50')
   })
 })

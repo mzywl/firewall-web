@@ -47,12 +47,16 @@ export interface NATPolicy {
  * Preview 页面里的策略 (跟 types/index.ts 里的 Policy 不同, 因为字段集合不一样)
  *
  * 字段说明:
+ *   - row_uuid: 后端给每行分配的唯一 ID, 用于 PUT /plan/ignore 切换忽略状态 (2026-06-28 Execution Plan)
+ *   - is_ignored: 前端控制的"软删除"标记 — true 时行变灰 (opacity-50), commit 时入 push_status='ignored'
  *   - source_zone / dest_zone: Excel 原始业务名 (中文)
  *   - source_ip / dest_ip / service: 单 IP 拆分后值, 可能含 \n 多行
  *   - 使用时间: 来自 user_modified 快照, 没编辑过则空字符串
  */
 export interface PreviewPolicy {
-  id: number;
+  row_uuid: string;           // Execution Plan: 后端 uuid.uuid4()
+  is_ignored: boolean;        // Execution Plan: 软删除标记, 前端 toggle / 后端 PUT /plan/ignore
+  id: number;                 // 原始 Policy.id (用于追溯 user_modified 快照)
   sequence?: number;
   original_policy_id?: number;
   source_zone: string;       // Excel 业务名
