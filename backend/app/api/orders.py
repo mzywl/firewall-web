@@ -68,35 +68,6 @@ async def upload_excel(
             )
             db.add(version_record)
         db.commit()
-
-        # 解析数据并调用严格匹配器写入 Policy 表
-        matcher = FirewallMatcher(db)
-        for row in excel_data['data']:
-            policy = Policy(
-                order_id=order.id,
-                source_system_name=str(row.get('source_system_name', '')),
-                dest_system_name=str(row.get('dest_system_name', '')),
-                source_ip=str(row.get('source_ip', '')),
-                dest_ip=str(row.get('dest_ip', '')),
-                service=str(row.get('service', '')),
-                # 注: Policy.action 字段已在 commit 229b08b spec 重写中删除 (spec §1 不再要 action 列)
-                usage_time=str(row.get('使用时间', '')) or str(row.get('usage_time', ''))
-            )
-
-            if policy.source_ip and policy.dest_ip:
-                try:
-                    matches = matcher.match_by_policy_context(policy)
-                    if matches:
-                        policy.firewall_id = matches[0]['firewall_id']
-                        policy.device_source_zone = matches[0]['device_source_zone']
-                        policy.device_dest_zone = matches[0]['device_dest_zone']
-                except Exception as e:
-                    logger.warning(f"防火墙严格资产匹配异常: {e}")
-
-            db.add(policy)
-
-        db.commit()
-
         return {
             "id": order.id, "order_no": order.order_no, "title": order.title,
             "description": order.description, "status": order.status,
@@ -106,7 +77,6 @@ async def upload_excel(
             "formatted_v1_data": excel_data['formatted_v1_data'],
             "formatted_v2_data": excel_data['formatted_v2_data']
         }
-
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"文件处理失败: {str(e)}")
@@ -192,11 +162,8 @@ def delete_order_policy(
         raise HTTPException(status_code=404, detail=f"策略 {policy_id} 不存在")
 
     db.delete(policy)
-    db.flush()  # 触发 FK 检查, 避免 commit 后才发现被引用
+    db.flush()
 
-    # 清 user_modified 快照里对应条目 (PolicyVersion.data.policies 是个 list[dict])
-    # 注: data 是 JSON/JSONB 列, SQLAlchemy 不会自动 track dict in-place 变更,
-    #     用 sqlalchemy.orm.attributes.flag_modified 显式标记 dirty
     from sqlalchemy.orm.attributes import flag_modified
     user_modified = db.query(PolicyVersion).filter(
         PolicyVersion.order_id == order_id,
@@ -240,100 +207,79 @@ def get_order_versions(order_id: int, db: Session = Depends(get_db)):
     ]
 
 
-FIELD_MAP = {
-    '源端系统-环境-用途': 'source_system_name',
-    '源IP': 'source_ip',
-    '源安全域': 'device_source_zone',
-    '目的端系统-环境-用途': 'dest_system_name',
-    '目的IP': 'dest_ip',
-    '目的安全域': 'device_dest_zone',
-    '目的端口': 'service',
-    '使用时间': 'usage_time',
-}
-
-
 @router.put("/{order_id}/policies")
 def update_policies(order_id: int, policies_data: List[dict], db: Session = Depends(get_db)):
     """
-    批量更新策略
+    前端传来的策略数据直接覆盖：
+    1. 覆盖 Policy 表
+    2. 覆盖 user_modified 版本
+    不做任何合并、不做匹配、不做自动逻辑
     """
     order = db.query(Order).filter(Order.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="工单不存在")
 
     try:
-        actual_updated = 0
-        matcher = FirewallMatcher(db)
+        updated_count = 0
 
-        for policy_data in policies_data:
-            policy_id = policy_data.get('id')
-            if not policy_id: continue
+        # 1. 直接落库到 Policy 表
+        for incoming in policies_data:
+            p_id = incoming.get("id")
+            if not p_id:
+                continue
 
-            policy = db.query(Policy).filter(Policy.id == policy_id, Policy.order_id == order_id).first()
-            if not policy: continue
+            policy_obj = db.query(Policy).filter(
+                Policy.id == p_id,
+                Policy.order_id == order_id
+            ).first()
 
-            row_changed = False
-            ip_changed = False
+            if not policy_obj:
+                continue
 
-            for cn_key, value in policy_data.items():
-                if cn_key == 'id': continue
+            # 直接覆盖字段（前端传什么就写什么）
+            policy_obj.source_system_name = incoming.get("源端系统-环境-用途")
+            policy_obj.source_ip = incoming.get("源IP")
+            policy_obj.device_source_zone = incoming.get("源安全域")
+            policy_obj.dest_system_name = incoming.get("目的端系统-环境-用途")
+            policy_obj.dest_ip = incoming.get("目的IP")
+            policy_obj.device_dest_zone = incoming.get("目的安全域")
+            policy_obj.service = incoming.get("目的端口")
+            policy_obj.usage_time = incoming.get("使用时间")
+            policy_obj.firewall_id = incoming.get("firewall_id")
 
-                en_key = FIELD_MAP.get(cn_key)
-                if en_key and hasattr(policy, en_key):
-                    old_val = getattr(policy, en_key)
-                    if str(old_val) != str(value):
-                        setattr(policy, en_key, value)
-                        row_changed = True
-                        if en_key in ['source_ip', 'dest_ip']:
-                            ip_changed = True
+            updated_count += 1
 
-            if ip_changed and policy.source_ip and policy.dest_ip:
-                try:
-                    matches = matcher.match_by_policy_context(policy)
-                    if matches:
-                        policy.firewall_id = matches[0]['firewall_id']
-                        policy.device_source_zone = matches[0]['device_source_zone']
-                        policy.device_dest_zone = matches[0]['device_dest_zone']
-                    else:
-                        # 2026-06-23: 不清 firewall_id / device_*_zone (spec §1 强制 NOT NULL)
-                        # spec 重写时这条 else 分支没联动改, 导致 PUT /policies 触发 NN 约束
-                        # 失败. 真要解绑 firewall 走 DELETE firewall (C1 cascade 已支持),
-                        # 不该在 update 流程里把必填字段清空
-                        logger.warning(
-                            f"策略 {policy.id} 更新后未匹配到 firewall, "
-                            f"保留原 firewall_id={policy.firewall_id}, device_*_zone 不动"
-                        )
-                except Exception as match_err:
-                    logger.warning(f"更新策略后执行严格重匹配失败: {match_err}")
+        # 2. 覆盖 user_modified 快照
+        from sqlalchemy.orm.attributes import flag_modified
 
-            if row_changed:
-                actual_updated += 1
+        user_version = db.query(PolicyVersion).filter(
+            PolicyVersion.order_id == order_id,
+            PolicyVersion.version_type == "user_modified"
+        ).first()
+
+        if user_version:
+            user_version.data = {"policies": policies_data}
+            flag_modified(user_version, "data")
+        else:
+            user_version = PolicyVersion(
+                order_id=order_id,
+                version_type="user_modified",
+                data={"policies": policies_data}
+            )
+            db.add(user_version)
+
+        # 清除旧 execution_plan
+        db.query(PolicyVersion).filter(
+            PolicyVersion.order_id == order_id,
+            PolicyVersion.version_type == "execution_plan"
+        ).delete()
 
         db.commit()
 
-        # 生成并刷新修改快照
-        all_policies = db.query(Policy).filter(Policy.order_id == order_id).all()
-        policies_dict = [{
-            'id': p.id,
-            'source_system_name': p.source_system_name,
-            'dest_system_name': p.dest_system_name,
-            'source_ip': p.source_ip,
-            'dest_ip': p.dest_ip,
-            'service': p.service,
-            # 'action' 字段已删: spec §1 不要 action 列, Policy ORM 不再持有此属性
-            'firewall_id': p.firewall_id,
-            'device_source_zone': p.device_source_zone,
-            'device_dest_zone': p.device_dest_zone,
-            '使用时间': p.usage_time or '',
-        } for p in all_policies]
-
-        db.query(PolicyVersion).filter(PolicyVersion.order_id == order_id,
-                                       PolicyVersion.version_type == 'user_modified').delete()
-        user_version = PolicyVersion(order_id=order_id, version_type='user_modified', data={'policies': policies_dict})
-        db.add(user_version)
-        db.commit()
-
-        return {"message": "策略更新成功", "updated_count": actual_updated}
+        return {
+            "message": "策略已直接覆盖更新（Policy + user_modified）",
+            "updated_count": updated_count
+        }
 
     except Exception as e:
         db.rollback()

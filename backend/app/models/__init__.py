@@ -1,45 +1,5 @@
 """SQLAlchemy 数据库模型 — 严格对齐 重构.md §1 spec
 
-重构时间: 2026-06-22
-重构背景: 旧实现累积了迁移 007-012 期间的多处字段 (covered_region, internal_protected_ips,
-          outbound_snat_pool 等), 这些字段在 重构.md spec 中不存在。本次按新设计统一清理。
-
-spec 字段集合 (参见 重构.md §1):
-  - firewalls: id/name/alias/type/management_ip/belong_region/is_zone_boundary/
-               connection_type/connection_config/auto_push/status/is_active/created_at/updated_at
-  - firewall_zones: id/firewall_id/zone_name/protected_ips/connect_region/created_at/updated_at
-  - zone_access_configs: id/firewall_id/source_region/dest_region/
-                         boundary_source_zone/boundary_dest_zone/need_nat/snat_pool/
-                         description/created_at/updated_at
-  - orders: id/order_no/title/description/excel_file_path/status/created_by/
-            created_at/updated_at/policies
-  - policies: id/order_id/firewall_id/source_ip/dest_ip/service/usage_time/
-              source_system_name/dest_system_name/device_source_zone/device_dest_zone/
-              source_snat_ip/push_status/push_result/pushed_at/created_at
-  - policy_versions: id/order_id/version_type/data/created_at
-  - pushed_policy_snapshots: id/order_id/firewall_id/batch_id/push_mode/status/
-                             total/new/reused/failed_policies/
-                             fetched_addresses/services/policies_json/
-                             error_log/started_at/finished_at/items/logs/order/firewall
-  - pushed_policy_items: id/snapshot_id/policy_id/match_key/
-                         device_src/dst/svc/sched_obj/device_policy_id/action/raw_commands/error_msg
-  - push_logs: id/snapshot_id/seq/stage/level/message/data_json/created_at
-
-已删除 (旧实现有, spec 明确不要):
-  - OperationLog 表 (不在 spec)
-  - ZoneAccessRule 表 (不在 spec)
-  - Firewall: covered_region, local_zone_name, external_zone_name,
-              internal_protected_ips, external_protected_ips, supported_policy_types,
-              outbound_snat_pool, inbound_snat_pool, allow_same_firewall_push,
-              push_contact, push_remark, remark, region(→belong_region)
-  - FirewallZone: description (新增 connect_region)
-  - ZoneAccessConfig: created_by (重命名 source_zone→source_region, dest_zone→dest_region, 加 boundary_* / need_nat / snat_pool)
-  - Order: logs 关系 (OperationLog 已删)
-  - Policy: action, is_merged, merged_policy_id, updated_at
-  - PushedPolicySnapshot: appended_policies, created_at
-  - PushedPolicyItem: order_id, firewall_id, src_addr_key, dst_addr_key,
-                      service_key, schedule_key, device_policy_name, created_at
-  - ConnectionType 枚举: cli, manual (spec 只留 ssh, api)
 """
 from sqlalchemy import Column, Integer, String, Text, DateTime, Enum, ForeignKey, JSON
 from sqlalchemy.orm import relationship
@@ -97,7 +57,6 @@ class PushLogLevel(str, enum.Enum):
     success = "success"
     warning = "warning"
     error = "error"
-
 
 # ==========================================
 # 1. 资产与网络矩阵模块
@@ -266,7 +225,6 @@ class Policy(Base):
     device_source_zone = Column(String(100), nullable=False, comment="系统计算出来的本地物理入向安全域")
     device_dest_zone = Column(String(100), nullable=False, comment="系统计算出来的本地物理出向安全域")
     source_snat_ip = Column(String(500), nullable=True, comment="若当前节点为边界墙且需要 SNAT, 记录下发的专属池, 否则留空")
-
     # 执行状态
     push_status = Column(String(50), default="pending", comment="单个物理策略放行状态 (pending/success/failed/reused)")
     push_result = Column(Text)

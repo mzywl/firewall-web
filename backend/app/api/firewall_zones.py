@@ -180,9 +180,3 @@ def delete_firewall_zone(zone_id: int, db: Session = Depends(get_db)):
     db.delete(db_zone)
     db.commit()
     return None
-
-
-# ==========================================
-# ZoneAccessRule 已删除 (spec 不要), 跨区域规则改用 ZoneAccessConfig
-# 详见 backend/app/api/zone_access.py
-# ==========================================

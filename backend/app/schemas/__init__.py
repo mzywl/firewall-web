@@ -62,7 +62,6 @@ class OrderResponse(OrderBase):
     class Config:
         from_attributes = True
 
-
 # ==========================================
 # Policy Schemas (对齐 spec 精简)
 # ==========================================
@@ -75,6 +74,10 @@ class PolicyBase(BaseModel):
     service: Optional[str] = Field(None, description="服务/端口")
     usage_time: Optional[str] = Field(None, description="使用时间")
 
+# --- Pydantic 模型 ---
+class IgnorePlanRowRequest(BaseModel):
+    row_uuid: str
+    ignore: bool  # True 表示变灰(删除)，False 表示恢复
 
 class PolicyCreate(PolicyBase):
     order_id: int

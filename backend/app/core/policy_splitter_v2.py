@@ -7,9 +7,6 @@ import re
 from sqlalchemy.orm import Session
 from app.models import Firewall
 
-# 假设复用你前序编写的端口压缩优化器
-# from app.services.policy_merger import PolicyMerger
-
 
 class PolicySplitterV2:
     """策略拆分器 V2 - 将一行策略拆分成多个独立的单IP/网段策略，精准探测防火墙边界"""
@@ -322,15 +319,9 @@ class PolicyMergerV2:
                 'action': p.get('action'),
                 'usage_time': usage_time,
                 'not_pushed_reason': p.get('not_pushed_reason'),
-                # 新增 (2026-06-22): zone 维度加入分组 key, 防止跨 zone 的 sp 错误合并
                 'src_zone_name': p.get('src_zone_name'),
                 'dst_zone_name': p.get('dst_zone_name'),
             }
-            # 透传所有非分组字段 (source_zone, dest_zone, original_policy_id, nat_info,
-            # pass_through, original_data, id 等)
-            # — 这些是前端展示 + preview.py 后续 NAT re-analyze 必需的 metadata
-            # — 必须在这里就带上, _stage_merge_* 用 item.copy() 会保留下来,
-            #   _render_to_final_format 再透传出去
             for k, v in p.items():
                 if k not in ('source_ip', 'dest_ip', 'service', 'firewall', 'direction',
                              'action', 'usage_time', 'not_pushed_reason', '使用时间',

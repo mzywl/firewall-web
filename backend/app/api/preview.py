@@ -5,16 +5,23 @@
   - 本路由只负责"按 firewall 分组 + 合并 + NAT 行渲染 + JSON 响应"
   - 链式寻路 + NAT 透传决策委托给 app.core.chain_planner
 """
+import re
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from datetime import datetime
 from typing import List, Dict
 import logging
 
+from sqlalchemy.orm.attributes import flag_modified
+
 from app.database import get_db
-from app.models import Order, Policy, PolicyVersion
+from app.models import Order, Policy, PolicyVersion, OrderStatus
 from app.core.chain_planner import ChainPlanner
 from app.core.nat_analyzer import NATAnalyzer
 from app.core.policy_splitter_v2 import PolicyMergerV2
+from app.schemas import  IgnorePlanRowRequest
 
 logger = logging.getLogger(__name__)
 
@@ -22,64 +29,90 @@ router = APIRouter(prefix="/api/workorders", tags=["preview"])
 
 
 @router.get("/{order_id}/preview")
-def get_preview_data(order_id: int, db: Session = Depends(get_db)):
+def get_preview_data(order_id: int, force_rebuild: bool = False, db: Session = Depends(get_db)):
     """
-    获取策略预览数据 V2 (chain_planner 重构版)
-
-    流水线:
-      1. 加载工单 + 策略 + user_modified 快照
-      2. ChainPlanner.generate_chain_execution_plan() → ChainContext
-         (含按 firewall 分组的 sp + pending + warnings)
-      3. 每个防火墙内执行 PolicyMergerV2 三步合并
-      4. 渲染 NAT 行 (仅 boundary fw 自己)
-      5. 拼 JSON 响应
+    获取策略预览数据：
+    优先读取 user_modified → formatted_v2
+    不再兜底读取 Policy 表
     """
-    # 加载工单
     order = db.query(Order).filter(Order.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="工单不存在")
 
-    # 加载策略
-    policies = db.query(Policy).filter(Policy.order_id == order_id).all()
+    # 1. 如果已有执行计划且不强制重建，直接返回
+    plan_version = db.query(PolicyVersion).filter(
+        PolicyVersion.order_id == order_id,
+        PolicyVersion.version_type == "execution_plan"
+    ).first()
 
-    # 加载 user_modified 快照, 按 policy_id 索引"使用时间"
-    # Policy 表无"使用时间"列, 数据保存在 user_modified 快照里 (见 orders.py update_policies)
-    usage_time_by_id: dict[int, str] = {}
-    user_modified_version = (
-        db.query(PolicyVersion)
-        .filter(
+    if plan_version and plan_version.data and not force_rebuild:
+        return plan_version.data
+
+    # 2. 优先 user_modified → formatted_v2
+    snapshot_data = None
+    used_version = None
+
+    # 优先 user_modified
+    user_modified = db.query(PolicyVersion).filter(
+        PolicyVersion.order_id == order_id,
+        PolicyVersion.version_type == "user_modified"
+    ).first()
+
+    if user_modified and user_modified.data and user_modified.data.get("policies"):
+        snapshot_data = user_modified.data["policies"]
+        used_version = "user_modified"
+
+    # 其次 formatted_v2
+    if snapshot_data is None:
+        formatted_v2 = db.query(PolicyVersion).filter(
             PolicyVersion.order_id == order_id,
-            PolicyVersion.version_type == "user_modified",
+            PolicyVersion.version_type == "formatted_v2"
+        ).first()
+        if formatted_v2 and formatted_v2.data and formatted_v2.data.get("policies"):
+            snapshot_data = formatted_v2.data["policies"]
+            used_version = "formatted_v2"
+    if snapshot_data is None:
+        raise HTTPException(status_code=400, detail="无可用策略数据（缺少 user_modified 或 formatted_v2）")
+
+    # 3. 转换为 Policy 对象用于执行计划计算
+    policies_to_plan = []
+    usage_time_by_id = {}
+
+    for p_dict in snapshot_data:
+        p_id = p_dict.get("id")
+        if p_id:
+            usage_time_by_id[p_id] = p_dict.get("使用时间") or ""
+
+        temp_policy = Policy(
+            id=p_id,
+            order_id=order_id,
+            source_system_name=p_dict.get("源端系统-环境-用途"),
+            source_ip=p_dict.get("源IP"),
+            device_source_zone=p_dict.get("源安全域"),
+            dest_system_name=p_dict.get("目的端系统-环境-用途"),
+            dest_ip=p_dict.get("目的IP"),
+            device_dest_zone=p_dict.get("目的安全域"),
+            service=p_dict.get("目的端口"),
+            usage_time=usage_time_by_id.get(p_id, "")
         )
-        .first()
-    )
-    if user_modified_version:
-        for p_dict in user_modified_version.data.get("policies", []):
-            pid = p_dict.get("id")
-            ut = p_dict.get("使用时间", "")
-            if pid is not None:
-                usage_time_by_id[pid] = ut
+        policies_to_plan.append(temp_policy)
 
-    # 1. 链式寻路: Pass 1 + Pass 2 级联匹配
+    # 4. 执行计划计算
     planner = ChainPlanner(db)
-    ctx = planner.generate_chain_execution_plan(policies, usage_time_by_id)
-
-    # 2. 每个防火墙内执行三步合并 + NAT 行渲染
+    ctx = planner.generate_chain_execution_plan(policies_to_plan, usage_time_by_id)
     nat_analyzer = NATAnalyzer(db)
+
+    # 5. 构建渲染数据（带 UUID）
+    firewalls_list = []
     for firewall_id, group in ctx.firewall_groups.items():
         merged = PolicyMergerV2.merge_policies(group["policies"])
         for idx, p in enumerate(merged, start=1):
             p["sequence"] = idx
+            p["row_uuid"] = str(uuid.uuid4())
+            p["is_ignored"] = False
             p["nat_policies"] = _build_nat_policies(p, group["firewall"], nat_analyzer)
-        group["policies"] = merged
 
-    # 3. 为不推送策略添加序号
-    for idx, p in enumerate(ctx.not_pushed, start=1):
-        p["sequence"] = idx
-
-    # 4. 拼 JSON 响应
-    firewalls_list = [
-        {
+        firewalls_list.append({
             "firewall_id": group["firewall"].id,
             "firewall_name": group["firewall"].name,
             "firewall": {
@@ -88,18 +121,18 @@ def get_preview_data(order_id: int, db: Session = Depends(get_db)):
                 "alias": group["firewall"].alias,
                 "type": group["firewall"].type,
                 "management_ip": group["firewall"].management_ip,
-                # 新设计 (2026-06-22): covered_region/local_zone_name/external_zone_name/push_contact 已删除
                 "belong_region": group["firewall"].belong_region,
-                # 2026-06-22: 前端用 is_zone_boundary 加 "将在此墙推送" 标识
                 "is_zone_boundary": group["firewall"].is_zone_boundary,
                 "auto_push": group["firewall"].auto_push,
             },
-            "policies": group["policies"],
-        }
-        for group in ctx.firewall_groups.values()
-    ]
+            "policies": merged,
+        })
 
-    return {
+    for idx, p in enumerate(ctx.not_pushed, start=1):
+        p["sequence"] = idx
+        p["row_uuid"] = str(uuid.uuid4())
+
+    plan_data = {
         "order": {
             "id": order.id,
             "order_no": order.order_no,
@@ -111,8 +144,166 @@ def get_preview_data(order_id: int, db: Session = Depends(get_db)):
         "unmatched_policies": ctx.not_pushed,
         "warnings": ctx.warnings,
         "errors": [],
+        "used_version": used_version,
     }
 
+    # 6. 保存执行计划
+    if not plan_version:
+        plan_version = PolicyVersion(order_id=order_id, version_type="execution_plan", data=plan_data)
+        db.add(plan_version)
+    else:
+        plan_version.data = plan_data
+        flag_modified(plan_version, "data")
+
+    db.commit()
+    return plan_data
+
+
+import re
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from datetime import datetime
+import logging
+
+from app.database import get_db
+from app.models import Order, Policy, PolicyVersion, OrderStatus
+
+logger = logging.getLogger(__name__)
+
+
+@router.post("/{order_id}/commit")
+def commit_order_policies(order_id: int, db: Session = Depends(get_db)):
+    """
+    提交工单：将执行计划快照写入 policies 物理表。
+    安全策略IP原样写入，仅针对边界墙额外生成 NAT 映射关系。
+    """
+    order = db.query(Order).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="工单不存在")
+
+    plan_version = db.query(PolicyVersion).filter(
+        PolicyVersion.order_id == order_id,
+        PolicyVersion.version_type == "execution_plan"
+    ).first()
+
+    if not plan_version or not plan_version.data:
+        raise HTTPException(status_code=400, detail="未找到执行计划，请先前往预览页检查策略。")
+
+    plan_data = plan_version.data
+
+    if plan_data.get("unmatched_policies"):
+        raise HTTPException(status_code=400, detail="存在未匹配防火墙的策略，无法提交，请先修改源/目的IP。")
+
+    try:
+        # 清除历史脏记录
+        db.query(Policy).filter(Policy.order_id == order_id).delete()
+        policies_to_insert = []
+
+        # 遍历执行计划中的每一个防火墙
+        for fw_group in plan_data.get("firewall_groups", []):
+            fw_id = fw_group["firewall_id"]
+
+            for p_dict in fw_group.get("policies", []):
+
+                # 1. 直接读取执行计划中算好的 source_ip，坚决不篡改！
+                final_source_ip = str(p_dict.get("source_ip", ""))
+                source_snat_mapping = None
+
+                nat_info = p_dict.get("nat_info") or {}
+
+                # 2. 只有当前墙是真正的【边界墙】（执行 SNAT）时，才写入映射关系
+                if nat_info.get("nat_type") == "SNAT" and nat_info.get("snat_address"):
+                    snat_address = nat_info.get("snat_address")
+
+                    # 为了映射的准确性，优先取 original_source_ip，没有则取 final_source_ip
+                    original_ip_for_mapping = p_dict.get("original_source_ip") or final_source_ip
+
+                    mappings = []
+                    # 按换行符或逗号切割多个 IP
+                    ip_list = [ip.strip() for ip in re.split(r'[\n,]', original_ip_for_mapping) if ip.strip()]
+
+                    # 组装关系：原IP-->NAT地址
+                    for ip in ip_list:
+                        mappings.append(f"{ip}-->{snat_address}")
+
+                    source_snat_mapping = "\n".join(mappings) if mappings else None
+
+                # 获取前端打的忽略（软删除）标记
+                is_ignored = p_dict.get("is_ignored", False)
+                final_push_status = "ignored" if is_ignored else "pending"
+
+                new_policy = Policy(
+                    order_id=order_id,
+                    firewall_id=fw_id,
+                    source_system_name=p_dict.get("source_system_name"),
+                    dest_system_name=p_dict.get("dest_system_name"),
+
+                    # 写入数据库（安全策略IP 与 NAT映射 分离）
+                    source_ip=final_source_ip,
+                    source_snat_ip=source_snat_mapping,
+
+                    dest_ip=p_dict.get("dest_ip"),
+                    service=p_dict.get("service"),
+                    device_source_zone=p_dict.get("device_source_zone") or p_dict.get("src_zone_name") or "Untrust",
+                    device_dest_zone=p_dict.get("device_dest_zone") or p_dict.get("dst_zone_name") or "Trust",
+                    usage_time=p_dict.get("usage_time", ""),
+                    push_status=final_push_status,
+                    created_at=datetime.now()
+                )
+                policies_to_insert.append(new_policy)
+
+        if policies_to_insert:
+            db.add_all(policies_to_insert)
+
+        # 推进工单状态
+        if hasattr(OrderStatus, 'pending_push'):
+            order.status = OrderStatus.pending_push
+
+        db.commit()
+
+        return {
+            "message": "执行计划已成功入库",
+            "inserted_count": len(policies_to_insert)
+        }
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"工单 {order_id} 策略入库失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"数据入库失败: {str(e)}")
+@router.put("/{order_id}/plan/ignore")
+def toggle_plan_row_ignore(order_id: int, req: IgnorePlanRowRequest, db: Session = Depends(get_db)):
+    """
+    修改执行计划：根据前端传递的 row_uuid 软删除或恢复对应的策略行
+    """
+    plan_version = db.query(PolicyVersion).filter(
+        PolicyVersion.order_id == order_id,
+        PolicyVersion.version_type == "execution_plan"
+    ).first()
+
+    if not plan_version or not plan_version.data:
+        raise HTTPException(status_code=404, detail="执行计划不存在，请先前往预览页生成策略。")
+
+    data = plan_version.data
+    row_found = False
+
+    # 遍历防火墙大组，找到对应的 uuid 修改状态
+    for fw_group in data.get("firewall_groups", []):
+        for p in fw_group.get("policies", []):
+            if p.get("row_uuid") == req.row_uuid:
+                p["is_ignored"] = req.ignore
+                row_found = True
+                break
+        if row_found:
+            break
+
+    if not row_found:
+        raise HTTPException(status_code=404, detail="未找到对应的策略行，请刷新页面重试。")
+
+    # 标记 JSON 脏数据，保存修改
+    flag_modified(plan_version, "data")
+    db.commit()
+
+    return {"message": "状态已更新", "row_uuid": req.row_uuid, "is_ignored": req.ignore}
 
 def _build_nat_policies(
     merged_policy: Dict,

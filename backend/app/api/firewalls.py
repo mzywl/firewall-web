@@ -68,10 +68,6 @@ def create_firewall(firewall: FirewallCreate, db: Session = Depends(get_db)):
         alias=firewall.alias,
         type=firewall.type,
         management_ip=firewall.management_ip,
-        # 新设计 (2026-06-22): region → belong_region,
-        # covered_region/local_zone_name/external_zone_name/internal_protected_ips/
-        # external_protected_ips/supported_policy_types/outbound_snat_pool/
-        # inbound_snat_pool/push_contact/push_remark/remark 全部删除
         belong_region=firewall.belong_region,
         is_zone_boundary=firewall.is_zone_boundary,
         connection_type=firewall.connection_type,
