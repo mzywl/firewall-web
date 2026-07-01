@@ -36,3 +36,6 @@ logs/
 # Database
 *.db
 *.sqlite
+
+# Runtime uploads (temp .xlsx from user upload)
+backend/app/uploads/

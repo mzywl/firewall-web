@@ -1,12 +1,18 @@
 """推送 API (v2 推送流水线)
 
-端点 (2026-06-28):
-- GET  /api/push/{order_id}/tasks                       Push 页进入时调用,按防火墙分组列 pending 策略 (用户新写)
-- POST /api/push/orders/{order_id}/start-v2            启动 v2 推送 (带 firewall_id + mode)
+端点 (2026-06-29 适配新 H3C Netmiko 管线):
+- GET  /api/push/orders/{order_id}/tasks                Push 页进入时调用,按防火墙分组列 pending 策略
+- POST /api/push/orders/{order_id}/start-v2             启动 v2 推送 (带 firewall_id + mode, 已对齐新 PushPipeline)
 - GET  /api/push/snapshots/{snapshot_id}                查快照详情
 - GET  /api/push/snapshots/{snapshot_id}/logs           查快照实时日志 (按 seq 增量轮询)
 - GET  /api/push/snapshots/{snapshot_id}/items          查快照明细
-- POST /api/push/orders/{order_id}/generate-script      本地生成 dry-run CLI 命令
+- POST /api/push/orders/{order_id}/generate-script      本地生成 dry-run CLI 命令 (已重写, 用 H3CConfigParser + StandardPolicyEngine)
+
+依赖服务架构 (新 H3C):
+  - H3CConfigParser.parse(text)        静态解析 object-group + security-policy
+  - H3CObjectResolver(addrs, svcs)     静态展开嵌套对象为真实 IP/端口
+  - StandardPolicyEngine(device_rules) 静态 6 要素比对 (FULL_MATCH / TIME_UPDATE / NEW_RULE)
+  - H3CNetmikoClient                   实例: SSH 连接 + generate_commands(new_policies) + push_commands(cmds)
 
 已删除 (前端 0 调用):
 - GET  /api/push/supported-types            (列出防火墙客户端类型)
@@ -17,7 +23,7 @@
 
 import json
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -25,10 +31,6 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 from app.database import get_db
-from app.services.push_analyzer import (
-    PrePushAnalyzer,
-    h3c_policies_to_fw_cache,
-)
 from app.models import (
     Firewall,
     Order,
@@ -37,11 +39,16 @@ from app.models import (
     PushedPolicySnapshot,
     PushLog,
 )
+from app.services.firewall_clients.h3c import (
+    H3CConfigParser,
+    H3CObjectResolver,
+)
 from app.services.firewall_clients.registry import (
     create_client,
     get_client_class,
 )
-from app.services.push_pipeline import PushPipeline, PushPipelineError
+from app.services.push_analyzer import StandardPolicyEngine
+from app.services.push_pipeline import PushPipeline
 
 router = APIRouter(prefix="/api/push", tags=["push"])
 
@@ -116,6 +123,12 @@ def start_push_v2(
 ):
     """启动 v2 推送（同步执行；如要异步走 Celery 调用 /tasks/push_v2_task）
 
+    (2026-06-29) 对齐新 H3C PushPipeline 签名: PushPipeline(order_id, firewall_info dict, pending_policies list)
+      - firewall_info 只需含 management_ip / username / password (其余可选)
+      - 凭据先 decrypt 再传入 (铁律: 链路全程明文, 边界处 encrypt)
+      - mode=force_push: 跳过 SSH, 把 device_rules 视为空 → 全部 NEW_RULE (假装设备为空)
+      - mode=deduplicate / reuse_objects: 正常 SSH + 6 要素查重
+
     注意：当前是同步执行（方便调试和测试）；真要异步化需要把 run() 拆到 Celery。
     """
     if mode not in ("deduplicate", "force_push", "reuse_objects"):
@@ -129,13 +142,44 @@ def start_push_v2(
     fw = db.query(Firewall).filter(Firewall.id == firewall_id).first()
     if not fw:
         raise HTTPException(status_code=404, detail="防火墙不存在")
-    if not order.policies:
-        raise HTTPException(status_code=400, detail="工单没有可推送的策略")
+
+    pending_policies = db.query(Policy).filter(
+        Policy.order_id == order_id,
+        Policy.firewall_id == firewall_id,
+        Policy.push_status == 'pending',
+    ).all()
+    if not pending_policies:
+        raise HTTPException(status_code=400, detail="该防火墙没有可推送的 pending 策略")
+
+    # 凭据解密 (铁律: encrypt 在 firewalls.py, decrypt 在 push.py 边界, 链路中间不要以为没接)
+    cfg = fw.connection_config or {}
+    ssh_user = cfg.get("username", "")
+    ssh_pass_enc = cfg.get("password", "")
+    if not ssh_user or not ssh_pass_enc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"防火墙 {fw.name} 缺 SSH 凭据，无法执行推送",
+        )
+    from app.api.firewalls import decrypt_password
+    ssh_pass = decrypt_password(ssh_pass_enc)
+
+    firewall_info = {
+        "management_ip": fw.management_ip,
+        "username": ssh_user,
+        "password": ssh_pass,
+        "port": cfg.get("port", 22),
+        "timeout": cfg.get("timeout", 30),
+    }
 
     try:
-        pipeline = PushPipeline(order_id=order_id, firewall_id=firewall_id, mode=mode, db=db)
+        pipeline = PushPipeline(
+            order_id=order_id,
+            firewall_info=firewall_info,
+            pending_policies=pending_policies,
+        )
         result = pipeline.run()
-    except PushPipelineError as e:
+    except Exception as e:
+        logger.exception("PushPipeline 异常")
         raise HTTPException(status_code=500, detail=f"推送失败: {e}")
 
     if not result.get("success"):
@@ -267,7 +311,7 @@ def get_snapshot_items(
 
 
 # ============================================================
-# 本地生成推送脚本（不连设备、不复用现有对象、不写快照）
+# 本地生成推送脚本（新 H3C 管线: H3CConfigParser + H3CObjectResolver + StandardPolicyEngine + H3CNetmikoClient）
 # ============================================================
 
 @router.post("/orders/{order_id}/generate-script")
@@ -275,12 +319,29 @@ def generate_push_script(
         order_id: int,
         firewall_id: int = Query(..., description="目标防火墙 ID"),
         fetch_device_config: bool = Query(
-            False,
-            description="是否连墙拉取真实配置做 6 要素复用分析 (False=纯本地 dry-run, 所有策略都 NEW_RULE)",
+            True,
+            description=(
+                "是否连墙拉取真实配置做 6 要素复用分析 (默认 True, 默认走查重). "
+                "False = dry_run / force_push 模式, 假装设备返回为空, 全部 NEW_RULE"
+            ),
         ),
         db: Session = Depends(get_db),
 ):
-    """本地生成推送到指定防火墙的 CLI 命令脚本 (结合 2026-06-27 链式寻路+NAT 精准版)"""
+    """本地生成推送到指定防火墙的 CLI 命令脚本
+
+    (2026-06-29 重写) 对齐新 H3C 管线:
+      - 设备配置解析:  H3CConfigParser.parse(text) (静态, 无需 client 实例)
+      - 嵌套对象展开:  H3CObjectResolver(addrs, svcs) (静态, 递归 group)
+      - 6 要素复用比对: StandardPolicyEngine(device_rules).match_reusability(std_req)
+      - CLI 命令生成:  client.generate_commands(new_policies, object_index, order_no)
+                        → 4 段式: object-group ip address / object-group service / time-range / security-policy
+
+    (2026-06-29 用户决策) 默认走查重 (fetch_device_config=True), 只有 frontend dry-run 模式或
+                       显式 force_push 时才跳过 SSH, 把 device_rules 视为空 → 全部 NEW_RULE.
+
+    响应字段集对齐前端 types/preview.ts:GenerateScriptResponse — 勿破坏字段.
+    """
+    # ----- 1. 基础校验 -----
     order = db.query(Order).filter(Order.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="工单不存在")
@@ -290,102 +351,57 @@ def generate_push_script(
     if not order.policies:
         raise HTTPException(status_code=400, detail="工单没有可生成的策略")
 
-    # 1. 校验设备类型有 client 实现
     fw_type = fw.type.value if hasattr(fw.type, "value") else str(fw.type)
     try:
         get_client_class(fw_type)
     except NotImplementedError as e:
         raise HTTPException(status_code=501, detail=str(e))
 
-    # 创建基础 client（暂不连设备）
-    client = create_client(
-        device_type=fw_type, host=fw.management_ip or "", username="", password="", port=22, timeout=5
-    )
-
-    # (2026-06-28) usage_time 不再需要单独从 user_modified 加载 — Policy.usage_time 物理表里已有
-    # 之前的 usage_time_by_id 是为 chain_planner 服务的, 现在不调 chain_planner 了.
-
-    # ============================================================
-    # (2026-06-28) 不走 chain_planner, 直接查 DB 拿 pending 策略
-    # 原因: chain_planner 会为跨墙 NAT 透传生成 PASS_THROUGH entry (Policy.id 来自上游墙),
-    #       而我们要的是"主防火墙是当前 firewall_id"的直接策略 — 二者不对齐.
-    # 简化: SNAT 转换关系已反映在 Policy.source_ip/dest_ip/source_snat_ip 里 (commit 时写入),
-    #       这里只需按 firewall_id + push_status='pending' 直查.
-    # ============================================================
+    # ----- 2. 取该墙 pending 策略 -----
     pending_policies = db.query(Policy).filter(
         Policy.order_id == order_id,
         Policy.firewall_id == firewall_id,
         Policy.push_status == 'pending',
     ).all()
 
+    base_empty = {
+        "success": True,
+        "firewall": {
+            "id": fw.id, "name": fw.name, "type": fw_type,
+            "management_ip": fw.management_ip,
+        },
+        "order": {
+            "id": order.id, "order_no": order.order_no, "title": order.title,
+        },
+        "stats": {
+            "total_order_policies": len(order.policies),
+            "to_push": 0, "skipped": 0, "commands": 0,
+            "full_match": 0, "time_update": 0, "new_rule": 0,
+        },
+        "policies": [], "new_policies": [], "commands": [], "skipped": [],
+        "device_config_fetched": False, "fetch_error": None,
+    }
     if not pending_policies:
-        return {
-            "success": True,
-            "firewall": {
-                "id": fw.id, "name": fw.name, "type": fw_type,
-                "management_ip": fw.management_ip,
-            },
-            "order": {"id": order.id, "order_no": order.order_no, "title": order.title},
-            "stats": {
-                "total_order_policies": len(order.policies),
-                "to_push": 0, "skipped": 0, "commands": 0,
-                "full_match": 0, "time_update": 0, "new_rule": 0,
-            },
-            "policies": [], "new_policies": [], "commands": [], "skipped": [],
-            "device_config_fetched": False, "fetch_error": None,
-        }
+        return base_empty
 
-    # 直接从 Policy 表构造 raw_policies
-    raw_policies: List[Dict[str, Any]] = []
-    seen: set = set()
-    skipped: List[Dict[str, Any]] = []
-
-    for idx, policy in enumerate(pending_policies):
-        # Policy.source_ip / dest_ip 是 '\n' 分隔的多行 IP
-        src_ips = [s.strip() for s in (policy.source_ip or "").split('\n') if s.strip()]
-        dst_ips = [d.strip() for d in (policy.dest_ip or "").split('\n') if d.strip()]
-        # Policy.service 是空格分隔的端口
-        ports = [p for p in (policy.service or "").split() if p]
-
-        # 基础去重 (按 src/dst/port 元组)
-        dedup_key = (tuple(src_ips), tuple(dst_ips), tuple(ports))
-        if dedup_key in seen:
-            continue
-        seen.add(dedup_key)
-
-        raw_policies.append({
-            "policy_id": policy.id,
-            "rule_name": f"O{order.order_no}-P{policy.id}-{idx}",
-            "src_ips": src_ips,
-            "dst_ips": dst_ips,
-            "ports": ports,
-            "valid_until": _normalize_valid_until(policy.usage_time),
-            "src_zone": policy.device_source_zone or "any",
-            "dst_zone": policy.device_dest_zone or "any",
-            "action": "permit",
-            "original_source_ip": policy.source_ip,  # 保留溯源
-            "source_snat_ip": policy.source_snat_ip,  # 用于 SNAT 命令生成
-        })
-
-    # 3. 接 PrePushAnalyzer 做设备 6 要素校验（若 fetch_device_config=True）
-    analyzer: PrePushAnalyzer
+    # ----- 3. (查重模式) 连墙拉配置, 解析为 device_rules + object_index -----
+    device_rules: List[Dict[str, Any]] = []
+    object_index: Dict[str, Dict[str, str]] = {"addresses": {}, "services": {}, "time_ranges": {}}
     device_config_fetched = False
-    fetch_error = None
+    fetch_error: Optional[str] = None
 
     if fetch_device_config:
         try:
             cfg = fw.connection_config or {}
             ssh_user = cfg.get("username", "")
             ssh_pass_enc = cfg.get("password", "")
-            if ssh_pass_enc:
-                from app.api.firewalls import decrypt_password
-                ssh_pass = decrypt_password(ssh_pass_enc)
-            else:
-                ssh_pass = ""
-            if not ssh_user or not ssh_pass:
-                raise ValueError(f"防火墙 {fw.id} ({fw.name}) 缺 SSH 凭据，无法深度分析复用")
+            if not ssh_user or not ssh_pass_enc:
+                raise ValueError(f"防火墙 {fw.name} 缺 SSH 凭据，无法深度分析复用")
 
-            client = create_client(
+            from app.api.firewalls import decrypt_password
+            ssh_pass = decrypt_password(ssh_pass_enc)
+
+            live_client = create_client(
                 device_type=fw_type,
                 host=fw.management_ip,
                 username=ssh_user,
@@ -393,112 +409,144 @@ def generate_push_script(
                 port=cfg.get("port", 22),
                 timeout=cfg.get("timeout", 30),
             )
-            config_text = client.fetch_running_config()
-            addresses, services, policies = client.parse_config(config_text)
-            fw_cache = h3c_policies_to_fw_cache(addresses, services, policies)
-            analyzer = PrePushAnalyzer(fw_cache)
-            device_config_fetched = True
+            try:
+                raw_config = live_client.fetch_running_config()
+                addresses, services, parsed_policies = H3CConfigParser.parse(raw_config)
+                resolver = H3CObjectResolver(addresses, services)
+                device_rules = [resolver.resolve_policy(p) for p in parsed_policies]
+                # 关键: 提取设备现网对象索引, 给 generate_commands 做"命中即引用"
+                object_index = resolver.build_object_index()
+                device_config_fetched = True
+            finally:
+                live_client.disconnect()
         except Exception as e:
-            logger.warning("PrePushAnalyzer: fetch_device_config 失败 (%s), fallback 到 NEW_RULE", e)
-            analyzer = PrePushAnalyzer({})
+            logger.warning(
+                "fetch_device_config 失败 (deep mode), fallback 到 NEW_RULE: %s", e
+            )
             fetch_error = str(e)
-    else:
-        analyzer = PrePushAnalyzer({})
+            device_rules = []
+            object_index = {"addresses": {}, "services": {}, "time_ranges": {}}
 
-    # 4. 跑 6 要素对比，累积命令快照
-    commands: List[str] = []
+    # ----- 4. 把 pending 策略喂给 StandardPolicyEngine 做 6 要素比对 -----
+    engine = StandardPolicyEngine(device_rules)
     policies_with_analysis: List[Dict[str, Any]] = []
-    stats_full_match = 0
-    stats_time_update = 0
-    stats_new_rule = 0
+    seen: set = set()
+    stats = {"full_match": 0, "time_update": 0, "new_rule": 0}
 
-    for raw in raw_policies:
-        # 喂给 6 要素分析器的是寻路洗白后的物理区与真实 NAT 地址
-        analysis = analyzer.analyze_single_policy({
-            "device_source_zone": raw["src_zone"],
-            "device_dest_zone": raw["dst_zone"],
-            "source_ip": raw["src_ips"][0] if raw["src_ips"] else "",
-            "dest_ip": raw["dst_ips"][0] if raw["dst_ips"] else "",
-            "service": " ".join(raw["ports"]) if raw["ports"] else "",
-            "usage_time": raw["valid_until"] if raw["valid_until"] != "长期" else "",
-            "original_policy_id": raw["policy_id"],
-            "rule_name": raw["rule_name"],
-        })
+    for idx, policy in enumerate(pending_policies):
+        std_req = engine.standardize_db_request(policy)
+        # engine 给的 rule_name 不带 idx (会跟 chain_planner 时代的命名冲突), 这里加 idx
+        std_req["rule_name"] = f"O{order.order_no}-P{policy.id}-{idx}"
+        # action 没在 standardize_db_request 里设, 显式补 (H3C generate_commands 会读)
+        std_req["action"] = "permit"
+        # 端口从 Policy.service 拆出来, 留空就是 ANY
+        std_req["ports"] = [p for p in (policy.service or "").split() if p] or ["ANY"]
 
-        if analysis["match_mode"] == "FULL_MATCH":
-            stats_full_match += 1
+        # 基础去重: 同 (src, dst, port) 元组只算一条
+        dedup_key = (tuple(std_req["src_ips"]), tuple(std_req["dst_ips"]), tuple(std_req["ports"]))
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+
+        # 跑匹配
+        match = engine.match_reusability(std_req)
+        mode_name = match["mode"]
+        reused_rule_name = match.get("reused_rule")
+        if mode_name == "FULL_MATCH":
+            stats["full_match"] += 1
+            push_script: List[str] = []
+            audit_message = f"完全复用设备现网策略 '{reused_rule_name}', 无需下发"
+        elif mode_name == "TIME_UPDATE":
+            stats["time_update"] += 1
+            # TODO: 生成 time-range 更新命令 (当前 H3C generate_commands 不含 schedule 更新块)
+            push_script = []
+            audit_message = f"复用 '{reused_rule_name}' 但需更新使用时间 (TODO: 生成 schedule 更新 CLI)"
         else:
-            commands.extend(analysis["push_script"])
-            if analysis["match_mode"] == "TIME_UPDATE":
-                stats_time_update += 1
-            else:
-                stats_new_rule += 1
+            stats["new_rule"] += 1
+            push_script = []  # 等下批量由 client.generate_commands 填
+            reused_rule_name = None
+            audit_message = "未匹配任何现网策略，将新建"
 
         policies_with_analysis.append({
-            **raw,
-            "match_mode": analysis["match_mode"],
-            "reused_rule_name": analysis["reused_rule_name"],
-            "reused_rule_content": analysis["reused_rule_content"],
-            "push_script": analysis["push_script"],
-            "audit_message": analysis["audit_message"],
+            "policy_id": policy.id,
+            "rule_name": std_req["rule_name"],
+            "src_ips": std_req["src_ips"],
+            "dst_ips": std_req["dst_ips"],
+            "ports": std_req["ports"],
+            "valid_until": std_req["valid_until"],
+            "src_zone": std_req["src_zone"],
+            "dst_zone": std_req["dst_zone"],
+            "action": std_req["action"],
+            "match_mode": mode_name,
+            "reused_rule_name": reused_rule_name,
+            "reused_rule_content": _format_reused_rule_content(device_rules, reused_rule_name),
+            "push_script": push_script,
+            "audit_message": audit_message,
         })
 
-    # 5. 对于完全 NEW_RULE 的策略，调用客户端的底层命令行生成器
-    if stats_new_rule > 0:
+    # ----- 5. 给 NEW_RULE 批量生成 H3C CLI 命令 (4 段式 + object 复用) -----
+    new_rule_policies = [p for p in policies_with_analysis if p["match_mode"] == "NEW_RULE"]
+    commands: List[str] = []
+    if new_rule_policies:
         try:
-            new_rule_policies = [p for p in policies_with_analysis if p["match_mode"] == "NEW_RULE"]
-            extra_cmds = client.generate_commands(
-                new_policies=[
-                    {
-                        "policy_id": p["policy_id"],
-                        "rule_name": p["rule_name"],
-                        "src_ips": p["src_ips"],
-                        "dst_ips": p["dst_ips"],
-                        "ports": p["ports"],
-                        "valid_until": p["valid_until"],
-                        "src_zone": p["src_zone"],
-                        "dst_zone": p["dst_zone"],
-                        "action": p["action"],
-                    }
-                    for p in new_rule_policies
-                ],
-                existing_addresses=[],
-                existing_services=[],
-                existing_schedules=[],
+            # create_client 需要 host/username/password 但不连设备, 传占位即可
+            cmd_client = create_client(
+                device_type=fw_type,
+                host=fw.management_ip or "",
+                username="", password="",
+                port=22, timeout=5,
             )
-            commands.extend(extra_cmds)
+            commands = cmd_client.generate_commands(
+                new_policies=new_rule_policies,
+                object_index=object_index,
+            )
+            # 把整组命令挂到每个 NEW_RULE policy 的 push_script (前端按墙级复制)
+            for p in policies_with_analysis:
+                if p["match_mode"] == "NEW_RULE":
+                    p["push_script"] = list(commands)
         except Exception as e:
             logger.warning("generate_commands 失败 (NEW_RULE): %s", e)
 
+    # ----- 6. 响应 (字段集对齐 types/preview.ts:GenerateScriptResponse) -----
     return {
-        "success": True,
-        "firewall": {
-            "id": fw.id,
-            "name": fw.name,
-            "type": fw_type,
-            "management_ip": fw.management_ip,
-        },
-        "order": {
-            "id": order.id,
-            "order_no": order.order_no,
-            "title": order.title,
-        },
+        **base_empty,
         "stats": {
             "total_order_policies": len(order.policies),
             "to_push": len(policies_with_analysis),
-            "skipped": len(skipped),
+            "skipped": 0,
             "commands": len(commands),
-            "full_match": stats_full_match,
-            "time_update": stats_time_update,
-            "new_rule": stats_new_rule,
+            "full_match": stats["full_match"],
+            "time_update": stats["time_update"],
+            "new_rule": stats["new_rule"],
         },
         "policies": policies_with_analysis,
-        "new_policies": policies_with_analysis,  # 保持前端组件兼容
+        "new_policies": policies_with_analysis,  # 前端兼容字段 (老代码 new_policies === policies)
         "commands": commands,
-        "skipped": skipped,
+        "skipped": [],
         "device_config_fetched": device_config_fetched,
         "fetch_error": fetch_error,
     }
+
+
+def _format_reused_rule_content(
+    device_rules: List[Dict[str, Any]], rule_name: Optional[str]
+) -> Optional[str]:
+    """把 device_rules 里命中的 rule 拼成单行可读摘要, 给前端展示 '复用: ...'
+
+    返回 None 表示无匹配 (前端用条件渲染隐藏)
+    """
+    if not rule_name:
+        return None
+    for r in device_rules:
+        if r.get("name") == rule_name:
+            return (
+                f"{r.get('name')} "
+                f"({r.get('src_zone', '?')}→{r.get('dst_zone', '?')}, "
+                f"{','.join(r.get('src_ips', []))}→{','.join(r.get('dst_ips', []))}, "
+                f"{','.join(r.get('ports', []))})"
+            )
+    return rule_name  # 兜底: 至少把 name 露出来
+
 
 def _normalize_valid_until(raw: str) -> str:
     """标准化"使用时间"字段为 generate_commands 能识别的 valid_until 格式
