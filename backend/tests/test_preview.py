@@ -30,7 +30,8 @@ def test_preview_api_returns_expected_structure(client, sample_firewall, db_sess
         dest_system_name='测试区',
         dest_ip='192.168.1.100',
         service='80',
-        action='permit',
+        device_source_zone='内网',  # spec §1 强制 NN
+        device_dest_zone='DMZ',
     )
     p2 = Policy(
         order_id=order.id,
@@ -40,7 +41,8 @@ def test_preview_api_returns_expected_structure(client, sample_firewall, db_sess
         dest_system_name='生产区',
         dest_ip='10.0.2.100',
         service='443',
-        action='permit',
+        device_source_zone='内网',  # spec §1 强制 NN
+        device_dest_zone='DMZ',
     )
     db_session.add_all([p1, p2])
     db_session.commit()
@@ -63,9 +65,13 @@ def test_preview_api_returns_expected_structure(client, sample_firewall, db_sess
     assert len(data['firewall_groups']) >= 1
     group = data['firewall_groups'][0]
     assert group['firewall']['id'] == sample_firewall.id
-    # firewall_groups 应有跨区策略 (p1), 同区策略 (p2) 因 sample_firewall.allow_same_firewall_push=0 默认被过滤到 unmatched
+    # firewall_groups 应有跨区策略 (p1)
+    # 注: p2 (同墙同 zone L2 互通) 在新 spec (2026-06-22 splitter 重构) 下走 warning_reason 路径,
+    #     不进 unmatched_policies, 改写为 warnings 数组里 (跟 trust upstream 精神)
     assert len(group['policies']) >= 1
-    assert len(data['unmatched_policies']) >= 1  # p2 同墙内部策略
+    assert len(data['unmatched_policies']) >= 0
+    # p2 应该在 warnings 里 (同墙同 zone L2 互通提示)
+    assert any('同墙同 zone' in w for w in data.get('warnings', []))
 
     # 7) 至少 1 条 need_nat=true (跨区策略)
     policies_with_nat = [p for p in group['policies'] if p['nat_info']['need_nat']]

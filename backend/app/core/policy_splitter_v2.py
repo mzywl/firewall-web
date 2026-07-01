@@ -7,9 +7,6 @@ import re
 from sqlalchemy.orm import Session
 from app.models import Firewall
 
-# 假设复用你前序编写的端口压缩优化器
-# from app.services.policy_merger import PolicyMerger
-
 
 class PolicySplitterV2:
     """策略拆分器 V2 - 将一行策略拆分成多个独立的单IP/网段策略，精准探测防火墙边界"""
@@ -38,6 +35,28 @@ class PolicySplitterV2:
                 # 匹配所有相关的防火墙及流量方向
                 matched_firewalls = self._match_all_firewalls(src_ip, dst_ip)
 
+                # 找 src/dst 对应的 zone_name (用于 merger 分组 key + warning 消息)
+                src_zone_name = None
+                dst_zone_name = None
+                for fw, _direction in matched_firewalls:
+                    zid = self._find_zone_id_by_ip(src_ip, fw)
+                    if zid is not None:
+                        for z in fw.zones:
+                            if z.id == zid:
+                                src_zone_name = z.zone_name
+                                break
+                        if src_zone_name:
+                            break
+                for fw, _direction in matched_firewalls:
+                    zid = self._find_zone_id_by_ip(dst_ip, fw)
+                    if zid is not None:
+                        for z in fw.zones:
+                            if z.id == zid:
+                                dst_zone_name = z.zone_name
+                                break
+                        if dst_zone_name:
+                            break
+
                 if not matched_firewalls:
                     # 没有任何物理资产网段覆盖该单IP对
                     result.append({
@@ -48,7 +67,9 @@ class PolicySplitterV2:
                         'usage_time': usage_time,
                         'firewall': None,
                         'direction': None,
-                        'not_pushed_reason': '未匹配到任何防火墙'
+                        'not_pushed_reason': '未匹配到任何防火墙',
+                        'src_zone_name': src_zone_name,
+                        'dst_zone_name': dst_zone_name,
                     })
                 else:
                     # 为每个被波及的物理墙生成独立的推送条目
@@ -61,15 +82,28 @@ class PolicySplitterV2:
                             'usage_time': usage_time,
                             'firewall': firewall,
                             'direction': direction,
-                            'not_pushed_reason': None
+                            'not_pushed_reason': None,
+                            'src_zone_name': src_zone_name,
+                            'dst_zone_name': dst_zone_name,
                         }
 
                         # 基于墙体属性执行策略安全拦截拦截
+                        # 新设计 (2026-06-22): allow_same_firewall_push 字段已删除, 同墙默认允许
                         if direction == 'same_firewall':
-                            if not getattr(firewall, 'allow_same_firewall_push', 0):
-                                policy_item['not_pushed_reason'] = '源目的IP均在同一防火墙内部，未启用同墙推送'
+                            pass  # 同墙策略不再受字段开关限制
                         elif direction == 'cross_internal':
                             policy_item['not_pushed_reason'] = f'源IP在{firewall.name}内部，目的IP在其他防火墙内部，跨防火墙内部通信不推送'
+                        elif direction == 'same_zone_l2':
+                            # 新增 (2026-06-22): 同墙同 zone L2 互通, fw 看不到流量
+                            # 用 warning_reason (不是 not_pushed_reason) → chain_planner 只加到 warnings,
+                            # 不进 not_pushed 列表 (用户要求 "只提示在异常里")
+                            policy_item['firewall'] = None
+                            policy_item['direction'] = None
+                            zone_label = src_zone_name or 'unknown'
+                            policy_item['warning_reason'] = (
+                                f'同墙同 zone (fw={firewall.name}, zone={zone_label}) L2 互通, '
+                                f'fw 看不到流量, 不推送'
+                            )
 
                         result.append(policy_item)
 
@@ -92,28 +126,47 @@ class PolicySplitterV2:
     def _match_all_firewalls(self, source_ip: str, dest_ip: str) -> List[Tuple[Firewall, str]]:
         """
         核心物理矩阵匹配：判定 IP 对在全网防火墙中的路由拓扑方向
+
+        返回 (firewall, direction) 元组列表。direction 取值:
+          - 'same_firewall':  同墙跨 zone (fw 内部跨 zone 隔离)
+          - 'same_zone_l2':  同墙同 zone (L2 互通, fw 看不到流量, 不推送)
+          - 'cross_internal': 跨墙同 region 内部通信 (不推送)
+          - 'outbound':     流量从 fw 出
+          - 'inbound':      流量进 fw
         """
         result = []
-        source_matches = []  # [(firewall, is_internal)]
+        # source_matches / dest_matches: [(fw, is_internal, zone_id_or_None)]
+        source_matches = []
         dest_matches = []
 
         for fw in self.firewalls:
-            src_internal = self._ip_in_range(source_ip, fw.internal_protected_ips)
-            src_external = self._ip_in_range(source_ip, fw.external_protected_ips)
-            dst_internal = self._ip_in_range(dest_ip, fw.internal_protected_ips)
-            dst_external = self._ip_in_range(dest_ip, fw.external_protected_ips)
+            # 新设计: 用 FirewallZone.protected_ips 替代旧的 internal/external_protected_ips
+            # internal 判定: zone.connect_region == fw.belong_region
+            src_internal = self._ip_in_internal_zones(source_ip, fw)
+            src_external = self._ip_in_external_zones(source_ip, fw)
+            dst_internal = self._ip_in_internal_zones(dest_ip, fw)
+            dst_external = self._ip_in_external_zones(dest_ip, fw)
+
+            # 找具体 zone_id (用于同墙同 zone 判定)
+            src_zone_id = self._find_zone_id_by_ip(source_ip, fw)
+            dst_zone_id = self._find_zone_id_by_ip(dest_ip, fw)
 
             if src_internal or src_external:
-                source_matches.append((fw, src_internal))
+                source_matches.append((fw, src_internal, src_zone_id))
             if dst_internal or dst_external:
-                dest_matches.append((fw, dst_internal))
+                dest_matches.append((fw, dst_internal, dst_zone_id))
 
-        # 1. 优先捕获全等同墙规则
+        # 1. 优先捕获同墙规则
         same_firewall_found = False
-        for src_fw, src_internal in source_matches:
-            for dst_fw, dst_internal in dest_matches:
+        for src_fw, src_internal, src_zone_id in source_matches:
+            for dst_fw, dst_internal, dst_zone_id in dest_matches:
                 if src_fw.id == dst_fw.id and src_internal and dst_internal:
-                    result.append((src_fw, 'same_firewall'))
+                    # 新增 (2026-06-22): 同墙同 zone 细分
+                    # 物理上 L2 互通不走 fw, 推了无意义, 标记 'same_zone_l2' 给调用方处理
+                    if src_zone_id is not None and src_zone_id == dst_zone_id:
+                        result.append((src_fw, 'same_zone_l2'))
+                    else:
+                        result.append((src_fw, 'same_firewall'))
                     same_firewall_found = True
                     break
             if same_firewall_found:
@@ -123,24 +176,51 @@ class PolicySplitterV2:
             return result
 
         # 2. 捕获同 region 下的跨内部核心隔离
-        for src_fw, src_internal in source_matches:
+        for src_fw, src_internal, _ in source_matches:
             if src_internal:
-                for dst_fw, dst_internal in dest_matches:
-                    if dst_internal and src_fw.id != dst_fw.id and getattr(src_fw, 'region', '') == getattr(dst_fw, 'region', 'default'):
+                for dst_fw, dst_internal, _ in dest_matches:
+                    if dst_internal and src_fw.id != dst_fw.id and getattr(src_fw, 'belong_region', '') == getattr(dst_fw, 'belong_region', 'default'):
                         result.append((src_fw, 'cross_internal'))
                         return result  # 拦截阻断
 
         # 3. 正常出向捕获
-        for fw, is_internal in source_matches:
+        for fw, is_internal, _ in source_matches:
             if is_internal:
                 result.append((fw, 'outbound'))
 
         # 4. 正常入向捕获
-        for fw, is_internal in dest_matches:
+        for fw, is_internal, _ in dest_matches:
             if is_internal:
                 result.append((fw, 'inbound'))
 
         return result
+
+    def _find_zone_id_by_ip(self, ip_str: str, fw: Firewall) -> Optional[int]:
+        """找 IP 命中的 FirewallZone.id (返回 None if 没命中)
+
+        用于同墙同 zone 细分判定 (2026-06-22): 同 src_zone_id 和 dst_zone_id 时
+        物理上 L2 互通, fw 看不到流量, 推送无意义。
+        """
+        if not ip_str or not fw.zones:
+            return None
+        try:
+            ip = self._extract_first_ip(ip_str)
+            ip_obj = ipaddress.ip_address(ip)
+        except Exception:
+            return None
+        for zone in fw.zones:
+            if not zone.protected_ips:
+                continue
+            for line in zone.protected_ips.strip().split('\n'):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    if ip_obj in ipaddress.ip_network(line, strict=False):
+                        return zone.id
+                except Exception:
+                    continue
+        return None
 
     def _ip_in_range(self, ip_str: str, range_str: str) -> bool:
         if not range_str:
@@ -161,6 +241,38 @@ class PolicySplitterV2:
         except:
             return False
 
+    def _ip_in_internal_zones(self, ip_str: str, fw: Firewall) -> bool:
+        """新设计: IP 落在 firewall 内部 zones (zone.connect_region == fw.belong_region)"""
+        if not fw.zones or not fw.belong_region:
+            return False
+        try:
+            ip = self._extract_first_ip(ip_str)
+            ip_obj = ipaddress.ip_address(ip)
+        except Exception:
+            return False
+        for zone in fw.zones:
+            if zone.connect_region != fw.belong_region:
+                continue
+            if zone.protected_ips and self._ip_in_range(ip_str, zone.protected_ips):
+                return True
+        return False
+
+    def _ip_in_external_zones(self, ip_str: str, fw: Firewall) -> bool:
+        """新设计: IP 落在 firewall 外部 zones (zone.connect_region != fw.belong_region)"""
+        if not fw.zones or not fw.belong_region:
+            return False
+        try:
+            ip = self._extract_first_ip(ip_str)
+            ip_obj = ipaddress.ip_address(ip)
+        except Exception:
+            return False
+        for zone in fw.zones:
+            if zone.connect_region == fw.belong_region:
+                continue
+            if zone.protected_ips and self._ip_in_range(ip_str, zone.protected_ips):
+                return True
+        return False
+
     def _extract_first_ip(self, ip_str: str) -> str:
         if not ip_str: return ""
         if '-' in ip_str: return ip_str.split('-')[0].strip()
@@ -175,9 +287,9 @@ class PolicyMergerV2:
     def merge_policies(policies: List[Dict]) -> List[Dict]:
         """
         三步安全无序聚合：
-        1. 聚合端口：相同 (源IP, 目的IP, 墙, 方向, 有效期) -> 端口去重
-        2. 聚合目的：相同 (源IP, 端口集, 墙, 方向, 有效期) -> 目的IP合并
-        3. 聚合源：  相同 (目的IP集, 端口集, 墙, 方向, 有效期) -> 源IP合并
+        1. 聚合端口：相同 (源IP, 目的IP, 墙, 方向, src_zone, dst_zone, 有效期) -> 端口去重
+        2. 聚合目的：相同 (源IP, 端口集, 墙, 方向, src_zone, dst_zone, 有效期) -> 目的IP合并
+        3. 聚合源：  相同 (目的IP集, 端口集, 墙, 方向, src_zone, dst_zone, 有效期) -> 源IP合并
 
         端口字段: 直接用 splitter (PortFormatter) 已经格式化好的字符串,
                   例如 "138-139\n445"。聚合用 Set[str] 做语义去重, 渲染时直接 join。
@@ -206,16 +318,14 @@ class PolicyMergerV2:
                 'direction': p.get('direction'),
                 'action': p.get('action'),
                 'usage_time': usage_time,
-                'not_pushed_reason': p.get('not_pushed_reason')
+                'not_pushed_reason': p.get('not_pushed_reason'),
+                'src_zone_name': p.get('src_zone_name'),
+                'dst_zone_name': p.get('dst_zone_name'),
             }
-            # 透传所有非分组字段 (source_zone, dest_zone, original_policy_id, nat_info,
-            # pass_through, original_data, id 等)
-            # — 这些是前端展示 + preview.py 后续 NAT re-analyze 必需的 metadata
-            # — 必须在这里就带上, _stage_merge_* 用 item.copy() 会保留下来,
-            #   _render_to_final_format 再透传出去
             for k, v in p.items():
                 if k not in ('source_ip', 'dest_ip', 'service', 'firewall', 'direction',
-                             'action', 'usage_time', 'not_pushed_reason', '使用时间'):
+                             'action', 'usage_time', 'not_pushed_reason', '使用时间',
+                             'src_zone_name', 'dst_zone_name'):
                     meta_item[k] = v
             meta_items.append(meta_item)
 
@@ -236,11 +346,14 @@ class PolicyMergerV2:
         merged = {}
         for item in items:
             # 基础路由属性元组作为散列 Key
+            # 新增 (2026-06-22): 加 src_zone_name/dst_zone_name 防止跨 zone 的 sp 错误合并
             key = (
                 frozenset(item['src_set']),
                 frozenset(item['dst_set']),
                 item['firewall'].id if item['firewall'] else None,
                 item['direction'],
+                item.get('src_zone_name'),
+                item.get('dst_zone_name'),
                 item['action'],
                 item['usage_time'],
                 item['not_pushed_reason']
@@ -255,11 +368,14 @@ class PolicyMergerV2:
     def _stage_merge_dests(items: List[Dict]) -> List[Dict]:
         merged = {}
         for item in items:
+            # 新增 (2026-06-22): 加 src_zone_name/dst_zone_name 防止跨 zone 的 sp 错误合并
             key = (
                 frozenset(item['src_set']),
                 frozenset(item['port_tokens']), # 👈 端口 token 作为不可变集合参与哈希，彻底解决顺序干扰
                 item['firewall'].id if item['firewall'] else None,
                 item['direction'],
+                item.get('src_zone_name'),
+                item.get('dst_zone_name'),
                 item['action'],
                 item['usage_time'],
                 item['not_pushed_reason']
@@ -283,11 +399,14 @@ class PolicyMergerV2:
         """
         merged = {}
         for item in items:
+            # 新增 (2026-06-22): 加 src_zone_name/dst_zone_name 防止跨 zone 的 sp 错误合并
             key = (
                 frozenset(item['dst_set']), # 👈 已经归一化排好序的目的集合作为哈希 Key
                 frozenset(item['port_tokens']),
                 item['firewall'].id if item['firewall'] else None,
                 item['direction'],
+                item.get('src_zone_name'),
+                item.get('dst_zone_name'),
                 item['action'],
                 item['usage_time'],
                 item['not_pushed_reason']

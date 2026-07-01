@@ -12,7 +12,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from app.database import Base
-from app.models import Order, Policy, Firewall, OperationLog
+# 重构.md §1: OperationLog 表已删除,只导入 spec 要求的模型
+from app.models import Order, Policy, Firewall
 
 # Alembic Config 对象
 config = context.config

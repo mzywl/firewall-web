@@ -27,11 +27,15 @@ export interface NATInfo {
  *
  * 坑点: PASS_THROUGH 行的 source_zone / dest_zone 用**当前 firewall** 视角的 zone_name
  *       (不是 region_nat_state 里的边界墙 zone_name)
+ *
+ * 2026-06-22 C3: 加 original_source_ip 字段 (C2 后端 chain_planner 透传),
+ *   PASS_THROUGH 行前端展示 "原 src=xxx" 让用户看流量从哪个原始 IP 来
  */
 export interface NATPolicy {
   type: 'SNAT' | 'PASS_THROUGH';
   source_zone: string;
   source_ip: string;
+  original_source_ip?: string;
   dest_zone: string;
   dest_ip: string;
   service: string;
@@ -43,12 +47,16 @@ export interface NATPolicy {
  * Preview 页面里的策略 (跟 types/index.ts 里的 Policy 不同, 因为字段集合不一样)
  *
  * 字段说明:
+ *   - row_uuid: 后端给每行分配的唯一 ID, 用于 PUT /plan/ignore 切换忽略状态 (2026-06-28 Execution Plan)
+ *   - is_ignored: 前端控制的"软删除"标记 — true 时行变灰 (opacity-50), commit 时入 push_status='ignored'
  *   - source_zone / dest_zone: Excel 原始业务名 (中文)
  *   - source_ip / dest_ip / service: 单 IP 拆分后值, 可能含 \n 多行
  *   - 使用时间: 来自 user_modified 快照, 没编辑过则空字符串
  */
 export interface PreviewPolicy {
-  id: number;
+  row_uuid: string;           // Execution Plan: 后端 uuid.uuid4()
+  is_ignored: boolean;        // Execution Plan: 软删除标记, 前端 toggle / 后端 PUT /plan/ignore
+  id: number;                 // 原始 Policy.id (用于追溯 user_modified 快照)
   sequence?: number;
   original_policy_id?: number;
   source_zone: string;       // Excel 业务名
@@ -65,6 +73,11 @@ export interface PreviewPolicy {
 
 /**
  * 防火墙 (preview 路由只返回部分字段, 注意跟 types/index.ts 里的不一样)
+ *
+ * 2026-06-22 C3 对齐:
+ *   - region → belong_region (spec §1 重命名)
+ *   - 删 push_contact (spec §1 删除字段)
+ *   - 加 is_zone_boundary (前端用 "将在此墙推送" 标识)
  */
 export interface PreviewFirewall {
   id: number;
@@ -72,10 +85,9 @@ export interface PreviewFirewall {
   alias: string;
   type: string;
   management_ip: string;
-  region: string;
+  belong_region: string;
+  is_zone_boundary: number;
   auto_push: number;
-  push_contact: string;
-  // 注意: preview API 还没回传 is_zone_boundary, 详见 SKILL.md 坑点 (待补)
 }
 
 export interface FirewallGroup {
@@ -126,6 +138,12 @@ export interface GenerateScriptNewPolicy {
   src_zone: string;
   dst_zone: string;
   action: string;
+  // C8 接入 PrePushAnalyzer 后的额外字段
+  match_mode?: 'FULL_MATCH' | 'TIME_UPDATE' | 'NEW_RULE';
+  reused_rule_name?: string | null;
+  reused_rule_content?: string | null;
+  push_script?: string[];
+  audit_message?: string;
 }
 
 export interface GenerateScriptStats {
@@ -133,6 +151,10 @@ export interface GenerateScriptStats {
   to_push: number;
   skipped: number;
   commands: number;
+  // C8 接入 PrePushAnalyzer 后的 3 mode 计数
+  full_match?: number;
+  time_update?: number;
+  new_rule?: number;
 }
 
 export interface GenerateScriptResponse {
@@ -150,6 +172,9 @@ export interface GenerateScriptResponse {
   };
   stats: GenerateScriptStats;
   new_policies: GenerateScriptNewPolicy[];
+  policies?: GenerateScriptNewPolicy[];  // C8: 跟 new_policies 同义, 保留兼容
   commands: string[];
   skipped: GenerateScriptSkipped[];
+  device_config_fetched?: boolean;
+  fetch_error?: string | null;
 }

@@ -1,10 +1,10 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Save, Eye } from 'lucide-react';
 import { Button } from '../components/ui/Button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
-import { SyncScrollTable } from '../components/table/SyncScrollTable';
+import { SyncScrollTable, type SyncScrollTableRef } from '../components/table/SyncScrollTable';
 import { useOrder, usePolicies, useUpdatePolicies } from '../hooks/useOrders';
 import type { Policy } from '../types';
 import { toast } from '../lib/toast';
@@ -13,6 +13,10 @@ export const Edit = () => {
   const { orderId } = useParams<{ orderId: string }>();
   const navigate = useNavigate();
   const [autoExecute, setAutoExecute] = useState(false);
+
+  // (2026-06-28) imperative ref — handleNext 时从这里拿当前编辑过的数据
+  // 不用 usePolicies 返回的 formattedV2Policies (那是陈旧的初次 fetch 快照)
+  const editableTableRef = useRef<SyncScrollTableRef>(null);
 
   const { data: order, isLoading: orderLoading, error: orderError, refetch: refetchOrder } = useOrder(Number(orderId));
 
@@ -25,7 +29,7 @@ export const Edit = () => {
   // 获取第二次格式化数据（Policy 表数据，可编辑，有真实ID）
   const { data: formattedV2Policies, isLoading: v2Loading, refetch } = usePolicies(
     Number(orderId),
-    undefined  // 不传 version，获取 Policy 表数据
+    'formatted_v2'  // 不传 version，获取 Policy 表数据
   );
   
   const updateMutation = useUpdatePolicies(Number(orderId));
@@ -46,11 +50,18 @@ export const Edit = () => {
   };
 
   const handleNext = async () => {
-    // 保存当前编辑
-    if (formattedV2Policies) {
+    // 保存当前编辑 — 优先从 SyncScrollTable 拿实时编辑数据 (2026-06-28 fix)
+    // 修复 "Edit 点下一步时, 修改没有保存" bug
+    // 原因: 之前用的是 usePolicies 返回的 formattedV2Policies (陈旧的初次 fetch 快照)
+    //       同步滚动表格内部 editedPolicies state 才是用户当前编辑的真实数据
+    const currentData = editableTableRef.current?.getCurrentData() ?? formattedV2Policies;
+    if (currentData && currentData.length > 0) {
+      await handleSave(currentData);
+    } else if (formattedV2Policies) {
+      // 兜底: ref 没拿到数据时用 hook 数据 (理论上不会发生)
       await handleSave(formattedV2Policies);
     }
-    
+
     // 如果勾选了自动执行，跳转到推送页面
     if (autoExecute) {
       navigate(`/order/${orderId}/push`);
@@ -210,6 +221,7 @@ export const Edit = () => {
           </CardHeader>
           <CardContent>
             <SyncScrollTable
+              ref={editableTableRef}
               topPolicies={formattedV1Policies || []}
               bottomPolicies={formattedV2Policies || []}
               onUpdate={handleSave}
@@ -244,6 +256,7 @@ export const Edit = () => {
             </CardHeader>
           <CardContent>
             <SyncScrollTable
+              ref={editableTableRef}
               mode="single"
               policies={formattedV2Policies || []}
               editable={true}

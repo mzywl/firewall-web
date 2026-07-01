@@ -4,7 +4,7 @@
 from celery import Task
 from app.core.celery_app import celery_app
 from app.database import SessionLocal
-from app.models import Order, Policy, Firewall, OperationLog, OrderStatus
+from app.models import Order, Policy, Firewall, OrderStatus
 from app.core.websocket import broadcast_push_progress, broadcast_push_log, broadcast_push_status
 import asyncio
 import time
@@ -128,16 +128,6 @@ def push_policies_task(self, order_id: int):
             'success_count': success_count,
             'failed_count': failed_count
         }))
-        
-        # 记录操作日志
-        log = OperationLog(
-            order_id=order_id,
-            operation_type='push',
-            operation_detail=final_message,
-            result='success' if failed_count == 0 else 'failed'
-        )
-        db.add(log)
-        db.commit()
         
         return {
             'success': failed_count == 0,

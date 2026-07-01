@@ -97,7 +97,13 @@ class PolicyMatcher:
         translated_dst_ips: Optional[List[str]] = None,
     ) -> MatchResult:
         """
-        匹配单条工单策略
+        匹配单条工单策略.
+
+        3 mode 行为 (重构.md §3):
+          - deduplicate: 优先查整条 reuse → REUSED (跳过) or CREATED
+          - force_push: 整条必然 CREATED, 对象由 client 决定复用/新建
+          - reuse_objects: 整条必然 CREATED, 对象必然复用 (跟 force_push 当前行为一致,
+                          未来 client 可差异化处理)
         """
         # 实际参与匹配的 IP：优先使用前序 NATAnalyzer 或边界墙做透传转换后的真实 IP (即 NAT 联动模式)
         effective_src = translated_src_ips if translated_src_ips is not None else src_ips
@@ -118,7 +124,7 @@ class PolicyMatcher:
                     reuse=reuse,
                 )
 
-        # 2) force_push 模式 或 查重未命中：开启新建流
+        # 2) force_push / reuse_objects: 整条必新建, 对象复用与否由 client 实现决定
         return MatchResult(
             policy_id=policy_id,
             action=MatchAction.CREATED,

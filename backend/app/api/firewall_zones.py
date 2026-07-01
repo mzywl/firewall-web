@@ -1,296 +1,182 @@
 """
-防火墙区域管理API
+防火墙区域管理 API — 对齐 重构.md §1 + 设计文档 §1
+
+新设计 (2026-06-22):
+  - 删除 ZoneAccessRule 表 (spec 不要)
+  - FirewallZone 新增 connect_region 字段 (替代 description)
+  - FirewallZone.description 字段已删
+
+进一步对齐设计文档 (2026-06-22):
+  - FirewallZone 新增 zone_role 字段 (internal/external 显式角色)
+  - 替代旧隐式判定 connect_region == fw.belong_region
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 from app.database import get_db
-from app.models import Firewall, FirewallZone, ZoneAccessRule
+from app.models import Firewall, FirewallZone
 
 router = APIRouter(prefix="/api/firewall-zones", tags=["firewall-zones"])
 
 
+# 设计文档 §1: 显式 enum
+ZONE_ROLE_INTERNAL = "internal"  # 内部防护域 (Trust)
+ZONE_ROLE_EXTERNAL = "external"  # 外部防护域 (Untrust, 通往其他墙/大区)
+
+
 class FirewallZoneCreate(BaseModel):
-    """创建防火墙区域"""
+    """创建防火墙区域 (设计文档 §1: zone_role 显式标记)"""
     firewall_id: int
     zone_name: str
     protected_ips: Optional[str] = None
-    description: Optional[str] = None
+    connect_region: str  # spec 要求 NOT NULL
+    zone_role: str = Field(default=ZONE_ROLE_INTERNAL, description="internal=内部防护, external=外部防护")
 
 
 class FirewallZoneUpdate(BaseModel):
     """更新防火墙区域"""
     zone_name: Optional[str] = None
     protected_ips: Optional[str] = None
-    description: Optional[str] = None
+    connect_region: Optional[str] = None
+    zone_role: Optional[str] = None
 
 
-class ZoneAccessRuleCreate(BaseModel):
-    """创建区域访问规则"""
-    source_zone_id: int
-    dest_zone_id: int
-    firewall_id: int
-    allow_access: int = 1
-    nat_type: Optional[str] = None
-    description: Optional[str] = None
+@router.get("/all")
+def get_all_firewall_zones(db: Session = Depends(get_db)):
+    """聚合所有 firewall 的 zone 数量, 给 /firewalls 列表页用
+
+    2026-06-22: 之前 FirewallManagement 前端循环拉 /firewall-zones/firewall/{fw.id}
+    是 N+1, 大列表性能差; 现在一次拉全表, 前端按 firewall_id 聚合即可。
+
+    返回: {"firewall_zones": [{"firewall_id": int, "zone_count": int}, ...]}
+    """
+    from sqlalchemy import func
+    rows = (
+        db.query(FirewallZone.firewall_id, func.count(FirewallZone.id))
+        .group_by(FirewallZone.firewall_id)
+        .all()
+    )
+    return {"firewall_zones": [{"firewall_id": fw_id, "zone_count": cnt} for fw_id, cnt in rows]}
 
 
 @router.get("/firewall/{firewall_id}")
 def get_firewall_zones(firewall_id: int, db: Session = Depends(get_db)):
-    """
-    获取指定防火墙的所有区域
-    """
+    """获取指定防火墙的所有区域"""
     firewall = db.query(Firewall).filter(Firewall.id == firewall_id).first()
     if not firewall:
         raise HTTPException(status_code=404, detail="防火墙不存在")
-    
+
     zones = db.query(FirewallZone).filter(FirewallZone.firewall_id == firewall_id).all()
-    
+
     return {
         "firewall": {
             "id": firewall.id,
             "name": firewall.name,
-            "alias": firewall.alias
+            "alias": firewall.alias,
+            "belong_region": firewall.belong_region,  # 新设计: region → belong_region
         },
         "zones": [
             {
                 "id": zone.id,
                 "zone_name": zone.zone_name,
                 "protected_ips": zone.protected_ips,
-                "description": zone.description,
+                "connect_region": zone.connect_region,
+                "zone_role": zone.zone_role,  # 设计文档 §1: 显式角色
                 "created_at": zone.created_at.isoformat(),
-                "updated_at": zone.updated_at.isoformat()
+                "updated_at": zone.updated_at.isoformat(),
             }
             for zone in zones
-        ]
+        ],
     }
 
 
 @router.post("/")
 def create_firewall_zone(zone: FirewallZoneCreate, db: Session = Depends(get_db)):
-    """
-    创建防火墙区域
-    """
-    # 检查防火墙是否存在
+    """创建防火墙区域"""
     firewall = db.query(Firewall).filter(Firewall.id == zone.firewall_id).first()
     if not firewall:
         raise HTTPException(status_code=404, detail="防火墙不存在")
-    
-    # 检查区域名称是否重复
+
+    if zone.zone_role not in (ZONE_ROLE_INTERNAL, ZONE_ROLE_EXTERNAL):
+        raise HTTPException(status_code=400, detail=f"zone_role 必须是 {ZONE_ROLE_INTERNAL} 或 {ZONE_ROLE_EXTERNAL}")
+
+    # 设计文档 §9 允许多个同名 zone (e.g. fw1 同时有 2 个 "Untrust" zone, 分别连不同大区)
+    # 唯一性按 (firewall_id, zone_name, connect_region) 复合键判
+    # 也就是说: 同名 + 同 connect_region → 视为真重复 (用户误操作)
+    # 同名 + 不同 connect_region → 合法 (设计文档 §9 多接口场景)
     existing = db.query(FirewallZone).filter(
         FirewallZone.firewall_id == zone.firewall_id,
-        FirewallZone.zone_name == zone.zone_name
+        FirewallZone.zone_name == zone.zone_name,
+        FirewallZone.connect_region == zone.connect_region,
     ).first()
-    
+
     if existing:
-        raise HTTPException(status_code=400, detail="该防火墙已存在同名区域")
-    
-    # 创建区域
+        raise HTTPException(
+            status_code=400,
+            detail=f"该防火墙已存在同名 + 同 connect_region 的区域 (zone_name='{zone.zone_name}', connect_region='{zone.connect_region}')",
+        )
+
     new_zone = FirewallZone(
         firewall_id=zone.firewall_id,
         zone_name=zone.zone_name,
         protected_ips=zone.protected_ips,
-        description=zone.description
+        connect_region=zone.connect_region,
+        zone_role=zone.zone_role,
     )
-    
+
     db.add(new_zone)
     db.commit()
     db.refresh(new_zone)
-    
+
     return {
-        "message": "区域创建成功",
-        "zone": {
-            "id": new_zone.id,
-            "firewall_id": new_zone.firewall_id,
-            "zone_name": new_zone.zone_name,
-            "protected_ips": new_zone.protected_ips,
-            "description": new_zone.description
-        }
+        "id": new_zone.id,
+        "firewall_id": new_zone.firewall_id,
+        "zone_name": new_zone.zone_name,
+        "protected_ips": new_zone.protected_ips,
+        "connect_region": new_zone.connect_region,
+        "zone_role": new_zone.zone_role,
+        "created_at": new_zone.created_at.isoformat(),
     }
 
 
 @router.put("/{zone_id}")
-def update_firewall_zone(
-    zone_id: int,
-    zone_update: FirewallZoneUpdate,
-    db: Session = Depends(get_db)
-):
-    """
-    更新防火墙区域
-    """
-    zone = db.query(FirewallZone).filter(FirewallZone.id == zone_id).first()
-    if not zone:
+def update_firewall_zone(zone_id: int, zone: FirewallZoneUpdate, db: Session = Depends(get_db)):
+    """更新防火墙区域"""
+    db_zone = db.query(FirewallZone).filter(FirewallZone.id == zone_id).first()
+    if not db_zone:
         raise HTTPException(status_code=404, detail="区域不存在")
-    
-    # 更新字段
-    if zone_update.zone_name is not None:
-        zone.zone_name = zone_update.zone_name
-    if zone_update.protected_ips is not None:
-        zone.protected_ips = zone_update.protected_ips
-    if zone_update.description is not None:
-        zone.description = zone_update.description
-    
-    zone.updated_at = datetime.utcnow()
-    
+
+    update_data = zone.dict(exclude_unset=True)
+    if "zone_role" in update_data and update_data["zone_role"] not in (ZONE_ROLE_INTERNAL, ZONE_ROLE_EXTERNAL):
+        raise HTTPException(status_code=400, detail=f"zone_role 必须是 {ZONE_ROLE_INTERNAL} 或 {ZONE_ROLE_EXTERNAL}")
+
+    for field, value in update_data.items():
+        setattr(db_zone, field, value)
+
+    db_zone.updated_at = datetime.utcnow()
     db.commit()
-    db.refresh(zone)
-    
+    db.refresh(db_zone)
+
     return {
-        "message": "区域更新成功",
-        "zone": {
-            "id": zone.id,
-            "zone_name": zone.zone_name,
-            "protected_ips": zone.protected_ips,
-            "description": zone.description
-        }
+        "id": db_zone.id,
+        "firewall_id": db_zone.firewall_id,
+        "zone_name": db_zone.zone_name,
+        "protected_ips": db_zone.protected_ips,
+        "connect_region": db_zone.connect_region,
+        "zone_role": db_zone.zone_role,
+        "updated_at": db_zone.updated_at.isoformat(),
     }
 
 
-@router.delete("/{zone_id}")
+@router.delete("/{zone_id}", status_code=204)
 def delete_firewall_zone(zone_id: int, db: Session = Depends(get_db)):
-    """
-    删除防火墙区域
-    """
-    zone = db.query(FirewallZone).filter(FirewallZone.id == zone_id).first()
-    if not zone:
+    """删除防火墙区域"""
+    db_zone = db.query(FirewallZone).filter(FirewallZone.id == zone_id).first()
+    if not db_zone:
         raise HTTPException(status_code=404, detail="区域不存在")
-    
-    db.delete(zone)
+
+    db.delete(db_zone)
     db.commit()
-    
-    return {"message": "区域删除成功"}
-
-
-@router.get("/{zone_id}/access-rules")
-def get_zone_access_rules(zone_id: int, db: Session = Depends(get_db)):
-    """
-    获取指定区域的访问规则
-    """
-    zone = db.query(FirewallZone).filter(FirewallZone.id == zone_id).first()
-    if not zone:
-        raise HTTPException(status_code=404, detail="区域不存在")
-    
-    # 获取源区域为该区域的规则
-    outbound_rules = db.query(ZoneAccessRule).filter(
-        ZoneAccessRule.source_zone_id == zone_id
-    ).all()
-    
-    # 获取目的区域为该区域的规则
-    inbound_rules = db.query(ZoneAccessRule).filter(
-        ZoneAccessRule.dest_zone_id == zone_id
-    ).all()
-    
-    return {
-        "zone": {
-            "id": zone.id,
-            "zone_name": zone.zone_name
-        },
-        "outbound_rules": [
-            {
-                "id": rule.id,
-                "dest_zone": {
-                    "id": rule.dest_zone.id,
-                    "zone_name": rule.dest_zone.zone_name
-                },
-                "allow_access": rule.allow_access,
-                "nat_type": rule.nat_type,
-                "description": rule.description
-            }
-            for rule in outbound_rules
-        ],
-        "inbound_rules": [
-            {
-                "id": rule.id,
-                "source_zone": {
-                    "id": rule.source_zone.id,
-                    "zone_name": rule.source_zone.zone_name
-                },
-                "allow_access": rule.allow_access,
-                "nat_type": rule.nat_type,
-                "description": rule.description
-            }
-            for rule in inbound_rules
-        ]
-    }
-
-
-@router.post("/access-rules")
-def create_zone_access_rule(rule: ZoneAccessRuleCreate, db: Session = Depends(get_db)):
-    """
-    创建区域访问规则
-    """
-    # 检查源区域和目的区域是否存在
-    source_zone = db.query(FirewallZone).filter(FirewallZone.id == rule.source_zone_id).first()
-    dest_zone = db.query(FirewallZone).filter(FirewallZone.id == rule.dest_zone_id).first()
-    
-    if not source_zone or not dest_zone:
-        raise HTTPException(status_code=404, detail="源区域或目的区域不存在")
-    
-    # 检查是否已存在相同规则
-    existing = db.query(ZoneAccessRule).filter(
-        ZoneAccessRule.source_zone_id == rule.source_zone_id,
-        ZoneAccessRule.dest_zone_id == rule.dest_zone_id,
-        ZoneAccessRule.firewall_id == rule.firewall_id
-    ).first()
-    
-    if existing:
-        # 更新现有规则
-        existing.allow_access = rule.allow_access
-        existing.nat_type = rule.nat_type
-        existing.description = rule.description
-        existing.updated_at = datetime.utcnow()
-        db.commit()
-        db.refresh(existing)
-        
-        return {
-            "message": "规则已更新",
-            "rule": {
-                "id": existing.id,
-                "source_zone_id": existing.source_zone_id,
-                "dest_zone_id": existing.dest_zone_id,
-                "allow_access": existing.allow_access,
-                "nat_type": existing.nat_type
-            }
-        }
-    else:
-        # 创建新规则
-        new_rule = ZoneAccessRule(
-            source_zone_id=rule.source_zone_id,
-            dest_zone_id=rule.dest_zone_id,
-            firewall_id=rule.firewall_id,
-            allow_access=rule.allow_access,
-            nat_type=rule.nat_type,
-            description=rule.description
-        )
-        
-        db.add(new_rule)
-        db.commit()
-        db.refresh(new_rule)
-        
-        return {
-            "message": "规则创建成功",
-            "rule": {
-                "id": new_rule.id,
-                "source_zone_id": new_rule.source_zone_id,
-                "dest_zone_id": new_rule.dest_zone_id,
-                "allow_access": new_rule.allow_access,
-                "nat_type": new_rule.nat_type
-            }
-        }
-
-
-@router.delete("/access-rules/{rule_id}")
-def delete_zone_access_rule(rule_id: int, db: Session = Depends(get_db)):
-    """
-    删除区域访问规则
-    """
-    rule = db.query(ZoneAccessRule).filter(ZoneAccessRule.id == rule_id).first()
-    if not rule:
-        raise HTTPException(status_code=404, detail="规则不存在")
-    
-    db.delete(rule)
-    db.commit()
-    
-    return {"message": "规则删除成功"}
+    return None

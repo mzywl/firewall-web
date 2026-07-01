@@ -1,379 +1,443 @@
-"""H3C 防火墙客户端
-
-参照旧版 /home/lishiyu/output/lishiyu/cx/H3C防火墙策略.py 重构:
-- 拉配置: dis cur (GB2312 编码)
-- 地址对象: object-group ip address "..."
-- 服务对象: object-group service "TCP-..." / "UDP-..."
-- 策略: rule name "..." / security-policy ip
-- 时间: time-range "..."
-
-注意: 这是简化版骨架，完整规则解析留给后续 PR 扩充。
-"""
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Tuple
+import ipaddress
+from typing import List, Dict, Set, Any, Tuple, Optional
 
-from .base import (
-    AddressObject,
-    ConnectionTestResult,
-    FirewallClient,
-    FirewallPolicy,
-    ServiceObject,
+from app.services.firewall_clients.base import (
+    NetmikoFirewallClient, AddressObject, ServiceObject, FirewallPolicy
 )
 
 
-class H3CClient(FirewallClient):
-    """H3C 防火墙客户端"""
+# ============================================================
+# 1. 文本正则与行扫描解析器
+# ============================================================
 
-    @property
-    def encoding(self) -> str:
-        return "gb2312"
+class H3CConfigParser:
+    # 保持原有默认服务映射，用于标准服务解析
+    DEFAULT_PORTS = {
+        "FTP": "TCP:21", "SSH": "TCP:22", "TELNET": "TCP:23", "SMTP": "TCP:25",
+        "DNS": "UDP:53\r\nTCP:53", "HTTP": "TCP:80", "HTTPS": "TCP:443",
+        "ICMP": "ICMP", "MYSQL": "TCP:3306", "MS-SQL": "TCP:1433", "RDP": "TCP:3389"
+    }
 
-    # ---------- 版本/连接 ----------
+    @classmethod
+    def parse(cls, config_text: str) -> Tuple[List[AddressObject], List[ServiceObject], List[FirewallPolicy]]:
+        return cls._parse_addresses(config_text), cls._parse_services(config_text), cls._parse_policies(config_text)
 
-    def _read_version(self) -> str:
-        """display version | include H3C"""
-        self.shell.send(self.encode("display version | include H3C\n"))
-        return self._recv_until("[H3C]", idle_pause=0.5, max_wait=5)
+    @classmethod
+    def _mask_to_cidr(cls, mask: str) -> int:
+        try:
+            return ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen
+        except Exception:
+            return 32
 
-    def _config_command(self) -> Tuple[str, str]:
-        """dis cur + 终止标记 return"""
-        return "dis cur", "return"
-
-    # ---------- 解析 ----------
-
-    def parse_config(
-        self, config_text: str
-    ) -> Tuple[List[AddressObject], List[ServiceObject], List[FirewallPolicy]]:
-        """解析 H3C 配置文本
-
-        完整解析需要非常多的正则（旧版 cx/H3C防火墙策略.py 有 800+ 行）。
-        这里只做骨架：识别 object-group 和 security-policy 段。
-        """
-        addresses = self._parse_addresses(config_text)
-        services = self._parse_services(config_text)
-        policies = self._parse_policies(config_text, addresses, services)
-        return addresses, services, policies
-
-    def _parse_addresses(self, text: str) -> List[AddressObject]:
-        """解析 object-group ip address 段"""
-        result = []
-        # 匹配一个 object-group 块: object-group ip address "name"\n ... \n
-        pattern = re.compile(
-            r'object-group\s+ip\s+address\s+"([^"]+)"\s*\n(.*?)(?=^object-group\s+ip\s+address\s+"|^quit\s*$)',
-            re.M | re.S,
-        )
-        for m in pattern.finditer(text):
-            name = m.group(1)
-            body = m.group(2)
-            # body 含 network host/subnet/range
+    @classmethod
+    def _parse_addresses(cls, text: str) -> List[AddressObject]:
+        results = []
+        pattern = re.compile(r'object-group\s+ip\s+address\s+"?([^"\n]+)"?\s*\n(.*?)(?=^\s*(?:object-group|quit|#))', re.M | re.S)
+        
+        for match in pattern.finditer(text):
+            name = match.group(1).strip()
             members = []
-            for line in body.split("\n"):
+            for line in match.group(2).split('\n'):
                 line = line.strip()
-                if "network host address" in line:
-                    val = line.split()[-1]
-                    members.append(val)
-                elif "network subnet" in line:
-                    parts = line.split()
-                    val = f"{parts[-2]}/{parts[-1]}"
-                    members.append(val)
-                elif "network range" in line:
-                    parts = line.split()
-                    val = f"{parts[-2]}-{parts[-1]}"
-                    members.append(val)
-                elif "network group-object" in line:
-                    members.append(f"@{line.split()[-1]}")
-            if members:
-                result.append(AddressObject(
-                    name=name, type="group", value="", members=members,
-                ))
-        return result
+                if not line or line.startswith('#') or line.startswith('description') or line.startswith('security-zone'): 
+                    continue
+                
+                parts = line.split()
+                if len(parts) < 3: 
+                    continue
+                
+                # 兼容 0 network host address X / 0 network host name X
+                if 'network host' in line:
+                    members.append(parts[-1])
+                elif 'network subnet' in line:
+                    # 格式: 0 network subnet 10.2.129.200 255.255.255.252
+                    cidr = cls._mask_to_cidr(parts[-1])
+                    members.append(f"{parts[-2]}/{cidr}")
+                elif 'network range' in line:
+                    # 格式: 0 network range 10.2.132.110 10.2.132.117
+                    members.append(f"{parts[-2]}-{parts[-1]}")
+                elif 'group-object' in line:
+                    members.append(f"@{parts[-1]}")
+            
+            results.append(AddressObject(name=name, type="group", value=name, members=members))
+        return results
 
-    def _parse_services(self, text: str) -> List[ServiceObject]:
-        """解析 object-group service 段"""
-        result = []
-        pattern = re.compile(
-            r'object-group\s+service\s+"(TCP-[^"]+|UDP-[^"]+)"\s*\n(.*?)(?=^object-group\s+service\s+"|^quit\s*$)',
-            re.M | re.S,
-        )
-        for m in pattern.finditer(text):
-            name = m.group(1)
-            body = m.group(2)
-            proto = "tcp" if name.startswith("TCP-") else "udp"
-            port = name.split("-", 1)[1]
-            result.append(ServiceObject(
-                name=name, protocol=proto, dst_port=port, members=[],
+    @classmethod
+    def _parse_services(cls, text: str) -> List[ServiceObject]:
+        results = []
+        # 加载基础预置服务
+        for k, v in cls.DEFAULT_PORTS.items():
+            results.append(ServiceObject(name=k, protocol="tcp", dst_port=v))
+
+        pattern = re.compile(r'object-group\s+service\s+"?([^"\n]+)"?\s*\n(.*?)(?=^\s*(?:object-group|quit|#))', re.M | re.S)
+        for match in pattern.finditer(text):
+            name = match.group(1).strip()
+            
+            for line in match.group(2).split('\n'):
+                line = line.strip()
+                if not line or line.startswith('#') or line.startswith('description'): 
+                    continue
+                
+                # 解析服务组内的多行定义
+                # 示例: 0 service udp destination eq 123
+                # 示例: 50 service tcp destination range 6810 6830
+                parts = line.split()
+                if 'service' in parts:
+                    idx = parts.index('service')
+                    if idx + 1 < len(parts):
+                        proto = parts[idx + 1]
+                        port_val = "any"
+                        if 'eq' in parts:
+                            port_val = parts[-1]
+                        elif 'range' in parts:
+                            port_val = f"{parts[-2]}-{parts[-1]}"
+                        elif 'group-object' in line:
+                            proto = "mix"
+                            port_val = f"@{parts[-1]}"
+                        
+                        results.append(ServiceObject(name=name, protocol=proto, dst_port=port_val))
+        return results
+
+    @classmethod
+    def _parse_policies(cls, text: str) -> List[FirewallPolicy]:
+        results = []
+        sec_block = re.search(r'security-policy\s+ip\s*\n(.*?)(?=^\s*return\s*$|^\s*#\s*$|\Z)', text, re.M | re.S)
+        if not sec_block: 
+            return results
+
+        rule_pat = re.compile(r'rule\s+(?:\d+\s+)?name\s+"?([^"\n]+)"?\s*\n(.*?)(?=^\s*rule\s+(?:\d+\s+)?name|^\s*quit\s*$|^\s*#\s*$)', re.M | re.S)
+        for match in rule_pat.finditer(sec_block.group(1)):
+            header_line = match.group(0).split('\n')[0]
+            name = match.group(1).strip()
+            body = match.group(2)
+            
+            # 安全提取 Rule ID
+            id_match = re.search(r'rule\s+(\d+)\s+name', header_line)
+            policy_id = id_match.group(1) if id_match else ""
+
+            src_zones = re.findall(r'source-zone\s+"?([^"\s]+)"?', body)
+            dst_zones = re.findall(r'destination-zone\s+"?([^"\s]+)"?', body)
+            
+            src_addrs = []
+            dst_addrs = []
+            services = []
+            
+            # 精准行扫描，规避正则截断空格缺陷
+            for line in body.split('\n'):
+                line = line.strip()
+                if not line: 
+                    continue
+                
+                # 提取源 IP 元素 / 组
+                if line.startswith('source-ip-host '):
+                    src_addrs.append(line.split()[1])
+                elif line.startswith('source-ip-subnet '):
+                    p = line.split()
+                    src_addrs.append(f"{p[1]}/{cls._mask_to_cidr(p[2])}")
+                elif line.startswith('source-ip-range '):
+                    p = line.split()
+                    src_addrs.append(f"{p[1]}-{p[2]}")
+                elif line.startswith('source-ip '):
+                    src_addrs.append(line.split(' ', 1)[1].strip('"'))
+                
+                # 提取目的 IP 元素 / 组
+                elif line.startswith('destination-ip-host '):
+                    dst_addrs.append(line.split()[1])
+                elif line.startswith('destination-ip-subnet '):
+                    p = line.split()
+                    dst_addrs.append(f"{p[1]}/{cls._mask_to_cidr(p[2])}")
+                elif line.startswith('destination-ip-range '):
+                    p = line.split()
+                    dst_addrs.append(f"{p[1]}-{p[2]}")
+                elif line.startswith('destination-ip '):
+                    dst_addrs.append(line.split(' ', 1)[1].strip('"'))
+                
+                # 提取引用对象服务 与 内嵌 service-port 服务
+                elif line.startswith('service-port '):
+                    p = line.split()
+                    proto = p[1].upper()
+                    if 'eq' in p:
+                        services.append(f"{proto}:{p[-1]}")
+                    elif 'range' in p:
+                        services.append(f"{proto}:{p[-2]}-{p[-1]}")
+                elif line.startswith('service '):
+                    services.append(line.split(' ', 1)[1].strip('"'))
+
+            action = "pass" if "action pass" in body else "drop"
+            enabled = "disable" not in body
+            schedule = re.search(r'time-range\s+"?([^"\s]+)"?', body)
+
+            results.append(FirewallPolicy(
+                policy_id=policy_id, name=name,
+                src_zone=src_zones[0] if src_zones else "any",
+                dst_zone=dst_zones[0] if dst_zones else "any",
+                src_addrs=src_addrs, dst_addrs=dst_addrs, services=services,
+                schedule=schedule.group(1) if schedule else None,
+                action=action, enabled=enabled
             ))
-        return result
+        return results
 
-    def _parse_policies(
-        self, text: str,
-        addresses: List[AddressObject],
-        services: List[ServiceObject],
-    ) -> List[FirewallPolicy]:
-        """解析 security-policy ip 段下的 rule"""
-        result = []
-        # 找 security-policy ip 段
-        sec_match = re.search(
-            r"security-policy\s+ip\s*\n(.*?)(?=^return\s*$|\Z)", text, re.M | re.S,
-        )
-        if not sec_match:
-            return result
-        body = sec_match.group(1)
-        # 每个 rule 是 rule name "X"\n ... \n
-        rule_pat = re.compile(
-            r'rule\s+name\s+"([^"]+)"\s*\n(.*?)(?=^rule\s+name\s+"|^quit\s*$)',
-            re.M | re.S,
-        )
-        for m in rule_pat.finditer(body):
-            name = m.group(1)
-            rb = m.group(2)
-            src_zone = self._extract_field(rb, "source-zone") or "any"
-            dst_zone = self._extract_field(rb, "destination-zone") or "any"
-            src_addrs = re.findall(r'source-ip\s+"?([^"\s]+)"?', rb)
-            dst_addrs = re.findall(r'destination-ip\s+"?([^"\s]+)"?', rb)
-            svcs = re.findall(r'service\s+"?([^"\s]+)"?', rb)
-            sched = self._extract_field(rb, "time-range")
-            action = "deny"
-            if "action pass" in rb or "action permit" in rb:
-                action = "accept"
-            enabled = "disable" not in rb
-            result.append(FirewallPolicy(
-                policy_id=name, name=name,
-                src_zone=src_zone, dst_zone=dst_zone,
-                src_addrs=src_addrs, dst_addrs=dst_addrs,
-                services=svcs, schedule=sched,
-                action=action, enabled=enabled,
-            ))
-        return result
 
-    def _extract_field(self, text: str, key: str) -> str:
-        m = re.search(rf'^{key}\s+"?([^"\s]+)"?', text, re.M)
-        return m.group(1) if m else ""
+# ============================================================
+# 2. 对象转换与安全反查索引
+# ============================================================
 
-    # ---------- 命令生成 ----------
+class H3CObjectResolver:
+    def __init__(self, addresses: List[AddressObject], services: List[ServiceObject]):
+        self.addr_index = {a.name: a.members for a in addresses}
+        
+        # 将服务组汇聚为多值映射 List，防止单名覆盖
+        self.svc_index: Dict[str, List[str]] = {}
+        for s in services:
+            val = f"{s.protocol.upper()}:{s.dst_port}"
+            self.svc_index.setdefault(s.name, []).append(val)
+
+    def resolve_policy(self, policy: FirewallPolicy) -> Dict[str, Any]:
+        return {
+            'policy_id': policy.policy_id,
+            "name": policy.name,
+            "src_zone": policy.src_zone,
+            "dst_zone": policy.dst_zone,
+            "src_ips": self._flatten_ips(policy.src_addrs),
+            "dst_ips": self._flatten_ips(policy.dst_addrs),
+            "ports": self._flatten_services(policy.services),
+            "valid_until": policy.schedule or "",
+            "action": policy.action
+        }
+
+    def _flatten_ips(self, items: List[str]) -> List[str]:
+        real_ips = set()
+        visited = set()
+        for item in items: 
+            self._walk_ip(item, real_ips, visited, 0)
+        return list(real_ips)
+
+    def _walk_ip(self, item: str, out: Set[str], visited: Set[str], depth: int) -> None:
+        if depth > 10 or not item or item in visited: 
+            return
+        # 已经是标准网络元素
+        if '/' in item or '-' in item or re.match(r'^\d+\.\d+\.\d+\.\d+$', item):
+            out.add(item)
+            return
+
+        visited.add(item)
+        clean_name = item.lstrip('@')
+        if clean_name in self.addr_index:
+            for member in self.addr_index[clean_name]:
+                self._walk_ip(member, out, visited, depth + 1)
+
+    def _flatten_services(self, items: List[str]) -> List[str]:
+        real_svcs = set()
+        for item in items:
+            if ":" in item:  # 内嵌解析生成的描述 (e.g. TCP:111)
+                real_svcs.add(item)
+            elif item in self.svc_index:
+                real_svcs.update(self.svc_index[item])
+            else:
+                real_svcs.add(item.upper())
+        return list(real_svcs)
+
+    def build_object_index(self) -> Dict[str, Dict[str, str]]:
+        """构建可复用的现网对象索引 (执行安全过滤机制)"""
+        addr_idx: Dict[str, str] = {}
+        
+        # 【安全边界优化】：只有当现网对象组内部仅有【单一原子元素】时，才允许反查引用
+        # 从而彻底杜绝因为复用聚合对象组而造成的隐式网络放行漏洞
+        for name, members in self.addr_index.items():
+            if len(members) == 1:
+                member = members[0].strip()
+                if not member.startswith('@'):
+                    addr_idx[member] = name
+
+        svc_idx: Dict[str, str] = {}
+        for name, port_list in self.svc_index.items():
+            if len(port_list) == 1 and not port_list[0].startswith('MIX:'):
+                svc_idx[port_list[0].lower()] = name
+
+        return {
+            "addresses": addr_idx,
+            "services": svc_idx,
+            "time_ranges": {},
+        }
+
+
+# ============================================================
+# 3. 客户端与命令生成实现
+# ============================================================
+
+class H3CNetmikoClient(NetmikoFirewallClient):
+
+    def _get_netmiko_device_type(self) -> str:
+        return "hp_comware"
+
+    def _get_show_config_command(self) -> str:
+        return "display current-configuration"
+
+    def _post_push_save(self) -> None:
+        self.connection.send_command_timing("save force")
 
     def generate_commands(
         self,
         new_policies: List[Dict[str, Any]],
-        existing_addresses: List[AddressObject],
-        existing_services: List[ServiceObject],
-        existing_schedules: List,
+        object_index: Optional[Dict[str, Dict[str, str]]] = None,
     ) -> List[str]:
-        """生成 H3C 的 CLI 命令
+        idx = object_index or {"addresses": {}, "services": {}, "time_ranges": {}}
+        addr_existing = idx.get("addresses", {})
+        svc_existing = idx.get("services", {})
+        tr_existing = idx.get("time_ranges", {})
 
-        new_policies 每条是 dict:
-            {
-                "src_ips": ["10.1.1.0/24", "10.2.2.1", ...],
-                "dst_ips": [...],
-                "ports": ["80", "443", "UDP:53"],
-                "valid_until": "2025-12-31" 或 "长期",
-                "src_zone": "trust",
-                "dst_zone": "untrust",
-                "rule_name": "工单号-源-目的",
-            }
-        """
-        cmds: List[str] = []
-        # 进入配置模式
-        cmds.append("system-view")
-        # 先建缺的地址对象 + 服务对象
+        addr_to_create: Dict[str, str] = {}
+        svc_to_create: Dict[str, str] = {}
+        tr_to_create: Dict[str, str] = {}
+
+        # 新增：智能区间名称压缩工具
+        def _compress_range_name(ip_key: str) -> str:
+            if "-" in ip_key:
+                parts = ip_key.split("-")
+                if len(parts) == 2:
+                    start_ip, end_ip = parts[0].strip(), parts[1].strip()
+                    s_octets = start_ip.split(".")
+                    e_octets = end_ip.split(".")
+                    # 如果前三个 C 段完全相同，则压缩名称 (e.g., 10.2.179.127-129)
+                    if len(s_octets) == 4 and len(e_octets) == 4 and s_octets[:3] == e_octets[:3]:
+                        return f"{start_ip}-{e_octets[3]}"
+            return ip_key
+        def _normalize_ip(ip: str) -> Optional[str]:
+            ip = ip.strip()
+            if not ip:
+                return None
+            try:
+                if "/" in ip:
+                    net = ipaddress.ip_network(ip, strict=False)
+                    return f"{net.network_address}/{net.prefixlen}"
+                if "-" in ip:
+                    return ip  # Range 保持原样作为 Key
+                return str(ipaddress.ip_address(ip))
+            except ValueError:
+                return None
+
+        def _normalize_port(port: str) -> Optional[Tuple[str, str]]:
+            port = port.strip()
+            if not port or port.upper() in ("ANY", "ALL"): 
+                return None
+            proto = "udp" if re.match(r'^UDP', port, re.I) else "tcp"
+            body = re.sub(r'^(TCP|UDP)[:_-]', '', port, flags=re.I).strip()
+            return (proto, body)
+
+        # 扫描待建元素
         for p in new_policies:
-            cmds.extend(self._gen_address_objects(
-                p["src_ips"], f"{p['rule_name']}-src", existing_addresses,
-            ))
-            cmds.extend(self._gen_address_objects(
-                p["dst_ips"], f"{p['rule_name']}-dst", existing_addresses,
-            ))
-            cmds.extend(self._gen_service_objects(
-                p["ports"], f"{p['rule_name']}-svc", existing_services,
-            ))
-        # time-range 跨规则 dedup — 同日期只建一次 (用日期作为 name, H3C 实际命令格式)
-        seen_schedules = set()
-        for p in new_policies:
-            vu = p.get("valid_until", "")
-            if vu and "长期" not in vu and vu not in seen_schedules:
-                seen_schedules.add(vu)
-                cmds.extend(self._gen_schedule_object(vu))
-        # 然后建策略
+            for ip in p.get("src_ips", []) or []:
+                key = _normalize_ip(ip)
+                if key and key not in addr_existing and key not in addr_to_create:
+                    # Key 存全称 (用于内部逻辑), Value 存压缩后的简写 (用于对象组命名)
+                    addr_to_create[key] = _compress_range_name(key)
+            for ip in p.get("dst_ips", []) or []:
+                key = _normalize_ip(ip)
+                if key and key not in addr_existing and key not in addr_to_create:
+                    addr_to_create[key] = _compress_range_name(key)
+            for port in p.get("ports", []) or []:
+                norm = _normalize_port(port)
+                if not norm: 
+                    continue
+                proto, body = norm
+                idx_key = f"{proto}:{body}"
+                if idx_key not in svc_existing:
+                    svc_to_create[idx_key] = f"{proto.upper()}-{body}"
+
+            vu = (p.get("valid_until") or "").strip()
+            if vu and vu != "长期":
+                m = re.match(r'^(\d{4})[\-/.](\d{1,2})[\-/.](\d{1,2})$', vu)
+                if m:
+                    date_str = f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+                    if date_str not in tr_existing:
+                        tr_to_create[date_str] = date_str
+
+        cmds: List[str] = ["system-view"]
+        # 2.1 下发地址对象组
+        for key, name in addr_to_create.items():
+            # 此时的 name 已经是 "10.2.179.127-129"
+            cmds.append(f'object-group ip address "{name}"')
+            if "/" in key:
+                net = ipaddress.ip_network(key, strict=False)
+                mask = net.netmask
+                cmds.append(f" network subnet {net.network_address} {mask}")
+            elif "-" in key:
+                # 此时的 key 依然是 "10.2.179.127-10.2.179.129"
+                a, b = key.split("-", 1)
+                # 完美的实体配置命令：0 network range 10.2.179.127 10.2.179.129
+                cmds.append(f" network range {a} {b}")
+            else:
+                cmds.append(f" network host address {key}")
+            cmds.append("quit")
+
+        # 2.2 下发服务对象组
+        for idx_key, name in svc_to_create.items():
+            proto, body = idx_key.split(":", 1)
+            cmds.append(f'object-group service "{name}"')
+            if "-" in body:
+                a, b = body.split("-", 1)
+                cmds.append(f" service {proto} destination range {a} {b}")
+            else:
+                cmds.append(f" ervice {proto} destination eq {body}")
+            cmds.append("quit")
+
+        # 2.3 下发时间范围
+        for date_str, name in tr_to_create.items():
+            cmds.append(f"time-range {name} from 00:00 2024/01/01 to 23:59 {date_str.replace('-', '/')}")
+
+        # 2.4 下发安全策略本体
         cmds.append("security-policy ip")
         for p in new_policies:
-            # 每条策略可能多行命令（rule name + 各属性 + action）
-            cmds.extend(self._gen_rule_command(p))
+            cmds.append(f"rule name {p['rule_name']}")
+            
+            # 纠正 action 动作映射错误映射（确保输出 pass/drop）
+            act = p.get('action', 'pass')
+            act = "pass" if act in ("pass", "accept",'permit') else "drop"
+            cmds.append(f" action {act}")
+
+            if p.get("src_zone") and p["src_zone"].lower() != "any":
+                cmds.append(f" source-zone {p['src_zone']}")
+            if p.get("dst_zone") and p["dst_zone"].lower() != "any":
+                cmds.append(f" destination-zone {p['dst_zone']}")
+
+            for ip in p.get("src_ips", []) or []:
+                key = _normalize_ip(ip)
+                ref = addr_existing.get(key) or addr_to_create.get(key) if key else None
+                cmds.append(f' source-ip "{ref}"' if ref else f' source-ip "{ip}"')
+
+            for ip in p.get("dst_ips", []) or []:
+                key = _normalize_ip(ip)
+                ref = addr_existing.get(key) or addr_to_create.get(key) if key else None
+                cmds.append(f' destination-ip "{ref}"' if ref else f' destination-ip "{ip}"')
+
+                # --- 原有的服务对象收集逻辑保持不变 ---
+            port_names = []
+            for port in p.get("ports", []) or []:
+                norm = _normalize_port(port)
+                if not norm:
+                    continue
+                idx_key = f"{norm[0]}:{norm[1]}"
+                ref = svc_existing.get(idx_key) or svc_to_create.get(idx_key)
+                if ref:
+                    port_names.append(ref)
+
+            # 【修复】：由同行空格合并改为【逐行下发】，适配华三现网真机语法
+            for pname in port_names:
+                cmds.append(f"  service {pname}")
+
+                # --- 原有的时间范围引用等逻辑 ---
+            vu = (p.get("valid_until") or "").strip()
+            if vu and vu != "长期":
+                m = re.match(r'^(\d{4})[\-/.](\d{1,2})[\-/.](\d{1,2})$', vu)
+                if m:
+                    d_key = f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+                    tr_name = tr_existing.get(d_key) or tr_to_create.get(d_key)
+                    if tr_name: 
+                        cmds.append(f" time-range {tr_name}")
+
         cmds.append("quit")
-        # 退 system-view (H3C 用 return 跟 quit 等价, 跟用户示例一致)
         cmds.append("return")
-        # 保存配置 (H3C 推送必须 save force, 否则重启后丢)
-        cmds.append("save force")
         return cmds
-
-    def _gen_address_objects(
-        self, ips: List[str], name_prefix: str, existing: List[AddressObject]
-    ) -> List[str]:
-        """生成地址对象创建命令，复用已存在的
-
-        对象名: 纯 IP 形式 (跟 H3C 真实命令一致)
-          - 单 IP: 10.2.179.130
-          - 范围: 192.169.1.135-142 (短格式, 同 /24 范围内只写末尾)
-          - 子网: 10.2.179.0/24
-        H3C object name 允许纯 IP (无前缀无引号), 不用 addr- 前缀
-        (Sangfor 必须保留 addr- 前缀 — 设备 object name 约束, 字母开头)
-        """
-        existing_values = {a.value: a.name for a in existing if a.value}
-        new_addrs = []
-        for ip in ips:
-            if ip in existing_values:
-                continue
-            new_addrs.append(ip)
-        if not new_addrs:
-            return []
-        cmds = []
-        for ip in new_addrs:
-            if "/" in ip:
-                net, mask = ip.split("/")
-                cmds.append(f"object-group ip address {ip}")
-                cmds.append(f"network subnet {net} {self._mask_from_prefix(int(mask))}")
-                cmds.append("quit")
-            elif "-" in ip:
-                # 范围 IP: 短格式 (同 /24 范围只写末尾 octet)
-                a, b = ip.split("-", 1)
-                a_parts = a.split(".")
-                b_parts = b.split(".") if "." in b else None
-                if b_parts and a_parts[:3] == b_parts[:3]:
-                    # 同 /24 范围内: 192.169.1.135-142
-                    short_ip = f"{a}-{b_parts[3]}"
-                else:
-                    short_ip = ip
-                cmds.append(f"object-group ip address {short_ip}")
-                cmds.append(f"network range {a} {b}")
-                cmds.append("quit")
-            else:
-                cmds.append(f"object-group ip address {ip}")
-                cmds.append(f"network host address {ip}")
-                cmds.append("quit")
-        return cmds
-
-    def _gen_service_objects(
-        self, ports: List[str], name_prefix: str, existing: List[ServiceObject]
-    ) -> List[str]:
-        existing_keys = {(s.protocol, s.dst_port): s.name for s in existing}
-        new_ports = [p for p in ports if self._port_key(p) not in existing_keys]
-        if not new_ports:
-            return []
-        cmds = []
-        for p in new_ports:
-            if p.startswith("UDP:"):
-                port = p.split(":")[1]
-                obj_name = f"UDP-{port}"
-                if "-" in port:
-                    a, b = port.split("-")
-                    cmds.append(f"object-group service {obj_name}")
-                    cmds.append(f"service udp destination range {a} {b}")
-                else:
-                    cmds.append(f"object-group service {obj_name}")
-                    cmds.append(f"service udp destination eq {port}")
-                cmds.append("quit")
-            else:
-                port = p
-                obj_name = f"TCP-{port}"
-                if "-" in port:
-                    a, b = port.split("-")
-                    cmds.append(f"object-group service {obj_name}")
-                    cmds.append(f"service tcp destination range {a} {b}")
-                else:
-                    cmds.append(f"object-group service {obj_name}")
-                    cmds.append(f"service tcp destination eq {port}")
-                cmds.append("quit")
-        return cmds
-
-    def _gen_schedule_object(self, valid_until: str) -> List[str]:
-        """生成 H3C time-range 命令
-
-        命名: 用日期作为 name (例: `time-range 2026-12-31 ...`)
-              不再用 `{rule_name}-sched` — 跨规则共享同一日期时 dedup 共用
-        日期格式: MM/DD/YYYY (美式, 跟 H3C 真实命令一致)
-        """
-        if not valid_until or "长期" in valid_until:
-            return []
-        # valid_until 格式: "2025-12-31" → 转 "12/31/2025"
-        try:
-            from datetime import datetime
-            date_obj = datetime.strptime(valid_until.replace("/", "-"), "%Y-%m-%d")
-            us_date = date_obj.strftime("%m/%d/%Y")
-            start_date = "01/01/2026"  # 跟用户示例一致: 从 2026-01-01 开始
-        except ValueError:
-            # 解析失败兜底
-            us_date = valid_until.replace("-", "/")
-            start_date = "01/01/2021"
-        cmds = [
-            f"time-range {valid_until} from 00:00:01 {start_date} to 23:59:59 {us_date}",
-        ]
-        return cmds
-
-    def _gen_rule_command(self, p: Dict[str, Any]) -> List[str]:
-        """生成 H3C 单条 rule 的完整命令（多行）
-
-        H3C 真实命令顺序:
-          rule name "..."
-          action pass
-          counting enable
-          logging enable
-          source-zone / destination-zone
-          source-ip / destination-ip (引用 addr-{ip})
-          service (引用 TCP-X / UDP-X)
-          time-range (引用时间对象名)
-
-        object name 跨 src/dst 复用 — 同 IP 只建一个, rule 引用纯 IP 形式
-        """
-        cmds = [f'rule name "{p["rule_name"]}"']
-        # 动作 (H3C 习惯 action 在前)
-        action = p.get("action", "permit")
-        cmds.append(f"action {action if action in ('permit', 'deny') else 'pass'}")
-        # 流量统计 + 日志 (H3C 推荐启用)
-        cmds.append("counting enable")
-        cmds.append("logging enable")
-        # 区域
-        if p.get("src_zone") and p["src_zone"] != "any":
-            cmds.append(f"source-zone {p['src_zone']}")
-        if p.get("dst_zone") and p["dst_zone"] != "any":
-            cmds.append(f"destination-zone {p['dst_zone']}")
-        # 源 IP
-        for ip in p.get("src_ips", []):
-            cmds.append(f'source-ip "{ip}"')
-        # 目的 IP
-        for ip in p.get("dst_ips", []):
-            cmds.append(f'destination-ip "{ip}"')
-        # 服务
-        for port in p.get("ports", []):
-            if port.startswith("UDP:"):
-                port_v = port.split(":", 1)[1]
-                cmds.append(f'service "UDP-{port_v}"')
-            else:
-                cmds.append(f'service "TCP-{port}"')
-        # 时间
-        vu = p.get("valid_until", "")
-        if vu and "长期" not in vu:
-            cmds.append(f"time-range {vu}")
-        return cmds
-
-    def _port_key(self, p: str) -> tuple:
-        if p.startswith("UDP:"):
-            return ("udp", p.split(":", 1)[1])
-        return ("tcp", p)
-
-    def _mask_from_prefix(self, prefix: int) -> str:
-        """从 /24 算出 255.255.255.0"""
-        bits = (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF
-        return f"{(bits >> 24) & 0xFF}.{(bits >> 16) & 0xFF}.{(bits >> 8) & 0xFF}.{bits & 0xFF}"
-
-    # ---------- 推送 ----------
-
-    def _push_preamble(self) -> str:
-        return "system-view"
-
-    def _push_postamble(self) -> str:
-        return "save\ny"  # H3C 配置完通常要 save
-
-    def _is_fatal_error(self, error: str) -> bool:
-        # H3C 错误信息 % 是致命的
-        return "% " in error

@@ -2,6 +2,7 @@
 Excel 文件解析模块
 """
 import openpyxl
+from openpyxl.utils import get_column_letter
 from typing import List, Dict, Any, Tuple
 import re
 from datetime import datetime, date
@@ -18,18 +19,12 @@ class ExcelParser:
 
     # 关键字段，用于查找真正的表头
     KEY_FIELDS = ["源IP", "目的IP", "目的端口"]
-
-    # 字段映射：Excel表头 -> 标准英文字段名（严格以此为准, 不接受别名）
-    # 设计: "源端系统-环境-用途" 解析为 source_system_name (业务系统名, 如 "vas-prod-app02")
-    #      跟防火墙的 source_zone (ZoneAccessConfig.source_zone, 业务名配置) 匹配
-    #      注意: 不要跟 "internal/external" 那种网络 zone 概念混
     FIELD_MAPPING = {
+        "源端系统-环境-用途": "source_system_name",
         "源IP": "source_ip",
+        "目的端系统-环境-用途": "dest_system_name",
         "目的IP": "dest_ip",
         "目的端口": "service",
-        "源端系统-环境-用途": "source_system_name",
-        "目的端系统-环境-用途": "dest_system_name",
-        "动作": "action",
         "使用时间": "usage_time",
     }
 
@@ -49,6 +44,13 @@ class ExcelParser:
             self.sheet = self._find_network_policy_sheet()
             logger.info(f"使用 sheet: {self.sheet.title}")
 
+            # =========================================================================
+            # 【阶段 1】：原始表格（刚上传表格、读取出内容时）
+            # 注意：此时处于“找到表头之前”，使用 Excel 列字母（A, B, C...）作为键，从第1行起盲读全表
+            # =========================================================================
+            original_data = self._read_raw_upload_data()
+            logger.info(f"原始表格（上传时）数据读取完成，共 {len(original_data)} 行")
+
             # 2. 查找真正的表头行
             header_row, headers = self._find_real_header()
             logger.info(f"表头行: {header_row}, 表头: {headers}")
@@ -56,39 +58,49 @@ class ExcelParser:
             if not headers:
                 raise Exception("未找到包含关键字段（源IP、目的IP、目的端口）的表头行")
 
-            # 3. 读取数据（从表头行之后开始）
-            data = self._read_data(headers, header_row)
-            logger.info(f"读取到 {len(data)} 行数据")
+            # 3. 读取数据（从真正的表头行之后开始）
+            raw_data = self._read_data(headers, header_row)
+            logger.info(f"按真实表头读取到 {len(raw_data)} 行数据")
 
             # 移除空列
-            data, headers = self._remove_empty_columns(data, headers)
+            cleaned_data, valid_headers = self._remove_empty_columns(raw_data, headers)
+            headers = valid_headers
 
-            # 保存原始数据（保留中文列头）
-            original_data = [dict(row) for row in data]
+            # =========================================================================
+            # 【阶段 2】：第一版表格（找到列头的时候）
+            # 此时移除了无关空列，且以真正的中文列头作为键，但数据尚未经过任何格式化清洗
+            # =========================================================================
+            v1_data = [dict(row) for row in cleaned_data]
+            logger.info(f"第一版表格（找到列头）提取完成，共 {len(v1_data)} 行数据")
 
-            # 4. 第一次格式化：格式化 IP 地址和端口（保留中文列头）
-            formatted_v1_data = self._format_ip_addresses([dict(row) for row in data])
-            logger.info(f"第一次格式化完成，共 {len(formatted_v1_data)} 行数据")
+            # 4. 数据清洗与格式化处理
+            # 格式化 IP 地址和端口
+            processing_data = self._format_ip_addresses([dict(row) for row in v1_data])
+            # 删除示例策略
+            processing_data = self._remove_example_policies(processing_data)
+            # 格式化使用时间
+            processing_data = self._format_usage_time(processing_data)
 
-            # 5. 第二次格式化：删除示例策略 + 格式化使用时间（保留中文列头）
-            formatted_v2_data = self._remove_example_policies([dict(row) for row in formatted_v1_data])
-            formatted_v2_data = self._format_usage_time(formatted_v2_data)
-            logger.info(f"第二次格式化完成（删除示例策略 + 格式化使用时间），剩余 {len(formatted_v2_data)} 行数据")
+            # =========================================================================
+            # 【阶段 3】：第二版表格（删除示例，格式化IP、时间等的时候）
+            # =========================================================================
+            v2_data = [dict(row) for row in processing_data]
+            logger.info(f"第二版处理完成（已删除示例并格式化IP、时间），剩余 {len(v2_data)} 行数据")
 
-            # 6. 转换成英文字段名（用于保存到 Policy 表）
-            normalized_data = self._normalize_field_names([dict(row) for row in formatted_v2_data])
+            # 5. 转换成英文字段名（用于最终保存到数据库）
+            final_data = self._normalize_field_names([dict(row) for row in v2_data])
             logger.info(f"字段名标准化完成")
 
-            if normalized_data:
-                logger.info(f"第一行数据示例: {normalized_data[0]}")
+            if final_data:
+                logger.info(f"第一行数据示例: {final_data[0]}")
 
             return {
                 "headers": headers,
-                "data": normalized_data,          # 版本4：英文字段名数据
-                "original_data": original_data,    # 版本1：原始数据（中文列头）
-                "formatted_v1_data": formatted_v1_data,  # 版本2：格式化IP端口（中文列头）
-                "formatted_v2_data": formatted_v2_data,  # 版本3：清洗后数据（中文列头）
-                "total_rows": len(normalized_data),
+                "original_data": original_data,  # 原始表格（上传表格、找表头之前的时候，键为 A, B, C...）
+                "formatted_v1_data": v1_data,              # 第一版表格（找到列头的时候，键为 中文列名）
+                "formatted_v2_data": v2_data,              # 第二版表格（删除示例，格式化等之后，键为 中文列名）
+                "data": final_data,              # 最终表格（英文字段名，用于入库）
+                "total_rows": len(final_data),
                 "header_row": header_row
             }
         except Exception as e:
@@ -97,6 +109,25 @@ class ExcelParser:
         finally:
             if self.workbook:
                 self.workbook.close()
+
+    def _read_raw_upload_data(self) -> List[Dict[str, Any]]:
+        """
+        在寻找真实表头之前，直接按行读取整个 Sheet 的绝对原始数据。
+        使用列字母（A, B, C...）作为字典的键，完整还原上传时的表格全貌。
+        """
+        data = []
+        for row_idx in range(1, self.sheet.max_row + 1):
+            row = list(self.sheet[row_idx])
+            row_data = {}
+            for col_idx, cell in enumerate(row, 1):
+                col_letter = get_column_letter(col_idx)
+                row_data[col_letter] = self._format_value(cell.value)
+
+            # 只要这一行有任意一个单元格有值（不为""），就视作有效原始行
+            if any(val != "" for val in row_data.values()):
+                row_data["_row_number"] = row_idx
+                data.append(row_data)
+        return data
 
     def _find_network_policy_sheet(self):
         for sheet in self.workbook.worksheets:
@@ -180,7 +211,6 @@ class ExcelParser:
 
     def _format_ip_addresses(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         for row in data:
-            # 依据 FIELD_MAPPING 的 Key (中文名) 统一处理
             if row.get("源IP"):
                 row["源IP"] = IPFormatter.format_ip_list(str(row["源IP"]))
             if row.get("目的IP"):
@@ -191,7 +221,6 @@ class ExcelParser:
 
     def _remove_example_policies(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         filtered_data = []
-        # 对应 FIELD_MAPPING 中系统名称的中文列名
         src_key = "源端系统-环境-用途"
         dst_key = "目的端系统-环境-用途"
 
@@ -217,11 +246,8 @@ class ExcelParser:
             formatted_time = '长期'
 
             try:
-                # 规则 1: 包含 "长期"
                 if '长期' in time_value:
                     formatted_time = '长期'
-
-                # 规则 2: 包含 "X个月"
                 elif '个月' in time_value:
                     months_match = re.search(r'(\d+)个月', time_value)
                     if months_match:
@@ -229,10 +255,7 @@ class ExcelParser:
                         future_date = date.today() + relativedelta(months=+months)
                         last_day = calendar.monthrange(future_date.year, future_date.month)[1]
                         formatted_time = f'{future_date.year}/{future_date.month:02d}/{last_day}'
-
-                # 规则 3: 日期格式（如 2026/06/18 或 2026-06-18）
                 else:
-                    # 尝试匹配常见的日期字符串 YYYY-MM-DD 或 YYYY/MM/DD (允许时分秒结尾)
                     date_match = re.match(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', time_value)
                     if date_match:
                         year = int(date_match.group(1))
@@ -240,7 +263,6 @@ class ExcelParser:
                         last_day = calendar.monthrange(year, month)[1]
                         formatted_time = f'{year}/{month:02d}/{last_day}'
                     else:
-                        # 规则 4: 其他无法解析的情况，默认返回 "长期"
                         formatted_time = '长期'
 
             except Exception as e:
@@ -262,7 +284,18 @@ class ExcelParser:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     excel_file_path = "123.xlsx"
     excel_parser = ExcelParser(excel_file_path)
-    data = excel_parser.parse()
-    print(data["data"])
+    try:
+        parsed_result = excel_parser.parse()
+        print("\n=== 各阶段数据量核对 ===")
+        print(f"原始表格 (找表头前): {len(parsed_result['original_data'])} 行 (包含表头行以及上方的标题行等)")
+        print(f"第一版表格 (找到列头): {len(parsed_result['v1_data'])} 行")
+        print(f"第二版表格 (清洗完毕): {len(parsed_result['v2_data'])} 行")
+
+        print("\n=== 原始表格第一行示例 ===")
+        if parsed_result['original_data']:
+            print(parsed_result['original_data'][0])
+    except Exception as e:
+        print(f"执行出错: {e}")

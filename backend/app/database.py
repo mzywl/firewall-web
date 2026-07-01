@@ -2,11 +2,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import os
-
+#    "postgresql://postgres:postgres@192.168.43.89:54321/firewall_db"
+#    "postgresql://postgres:postgres@localhost:5432/firewall_db"
+#    "postgresql://postgres:postgres@192.168.1.3:54321/firewall_db"
 # 数据库配置
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://postgres:postgres@192.168.43.89:54321/firewall_db"
+    "postgresql://postgres:postgres@localhost:5432/firewall_db"
 )
 
 # 创建数据库引擎

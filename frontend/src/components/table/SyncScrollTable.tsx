@@ -1,4 +1,5 @@
-import { useRef, useEffect, useCallback, useState } from 'react';
+import { useRef, useEffect, useCallback, useState, forwardRef, useImperativeHandle } from 'react';
+import type { MutableRefObject } from 'react';
 import type { Policy } from '../../types';
 import { useSyncScroll } from '../../hooks/useSyncScroll';
 
@@ -25,6 +26,20 @@ interface SingleProps extends BaseProps {
 
 type SyncScrollTableProps = DualProps | SingleProps;
 
+/**
+ * Imperative ref API (2026-06-28)
+ *
+ * 父组件 (Edit.tsx handleNext) 通过 ref.current.getCurrentData() 拿到表格**当前编辑**的最新数据,
+ * 而不是 props 传入的原始 policies — 修复 "Edit 点下一步时数据是陈旧的" bug。
+ *
+ * 数据流:
+ *   EditableTable 内部 useState(editedPolicies) → useEffect → dataRef.current = editedPolicies
+ *   SyncScrollTable 用 useImperativeHandle 暴露 getCurrentData → 返回 dataRef.current
+ */
+export interface SyncScrollTableRef {
+  getCurrentData: () => Policy[];
+}
+
 // 固定列顺序和列宽配置（使用 Excel 原始中文字段名）
 const COLUMNS = [
   { key: '源端系统-环境-用途', label: '源端系统-环境-用途', width: '200px' },
@@ -35,7 +50,7 @@ const COLUMNS = [
   { key: '使用时间', label: '使用时间', width: '120px' },
 ];
 
-export const SyncScrollTable = (props: SyncScrollTableProps) => {
+export const SyncScrollTable = forwardRef<SyncScrollTableRef, SyncScrollTableProps>((props, ref) => {
   // dual 模式默认; single 模式用 policies / editable
   const isSingle = props.mode === 'single';
   const loading = props.loading ?? false;
@@ -48,6 +63,17 @@ export const SyncScrollTable = (props: SyncScrollTableProps) => {
   const { onScrollA: onTopScroll, onScrollB: onBottomScroll } = useSyncScroll(
     topScrollRef,
     bottomScrollRef,
+  );
+
+  // (2026-06-28) 暴露给父组件拿当前编辑数据的 ref
+  // EditableTable 内部 useEffect 会同步 editedPolicies 到 dataRef.current
+  const latestDataRef = useRef<Policy[]>([]);
+  useImperativeHandle(
+    ref,
+    () => ({
+      getCurrentData: () => latestDataRef.current,
+    }),
+    [],
   );
 
   if (loading) {
@@ -73,7 +99,7 @@ export const SyncScrollTable = (props: SyncScrollTableProps) => {
           className="overflow-x-auto"
           onScroll={onBottomScroll}
         >
-          <EditableTable policies={policies} onUpdate={onUpdate} editable={editable} />
+          <EditableTable policies={policies} onUpdate={onUpdate} editable={editable} dataRef={latestDataRef} />
         </div>
       </div>
     );
@@ -143,21 +169,24 @@ export const SyncScrollTable = (props: SyncScrollTableProps) => {
             policies={props.bottomPolicies}
             onUpdate={onUpdate}
             editable={true}
+            dataRef={latestDataRef}
           />
         </div>
       </div>
     </div>
   );
-};
+});
 
 // 可编辑表格组件
 interface EditableTableProps {
   policies: Policy[];
   onUpdate?: (policies: Policy[]) => void;
   editable?: boolean;  // 默认 true; false 时单元格 onClick 短路, 完全只读
+  /** (2026-06-28) 父组件 SyncScrollTable 传入, 用于实时同步当前编辑数据给 imperative ref */
+  dataRef?: MutableRefObject<Policy[]>;
 }
 
-const EditableTable = ({ policies, onUpdate, editable = true }: EditableTableProps) => {
+const EditableTable = ({ policies, onUpdate, editable = true, dataRef }: EditableTableProps) => {
   const [editedPolicies, setEditedPolicies] = useState<Policy[]>(policies);
   const [editingCell, setEditingCell] = useState<{ rowId: number; field: string } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -165,6 +194,14 @@ const EditableTable = ({ policies, onUpdate, editable = true }: EditableTablePro
   useEffect(() => {
     setEditedPolicies(policies);
   }, [policies]);
+
+  // (2026-06-28) 同步当前编辑数据给 SyncScrollTable 的 imperative ref
+  // 让父组件 handleNext 等命令式触发能拿到最新数据, 而不是陈旧的 policies prop
+  useEffect(() => {
+    if (dataRef) {
+      dataRef.current = editedPolicies;
+    }
+  }, [editedPolicies, dataRef]);
 
   const handleCellClick = useCallback((rowId: number, field: string) => {
     setEditingCell({ rowId, field });

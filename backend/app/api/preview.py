@@ -1,16 +1,27 @@
 """
-策略预览API V2 - 完全重写
+策略预览API V2 - chain_planner 重构版
+
+设计对应 backend/重构.md §6.2 "拓扑寻路与 NAT 链式预分析":
+  - 本路由只负责"按 firewall 分组 + 合并 + NAT 行渲染 + JSON 响应"
+  - 链式寻路 + NAT 透传决策委托给 app.core.chain_planner
 """
+import re
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import List, Dict, Optional, Any
-import ipaddress
+from datetime import datetime
+from typing import List, Dict
 import logging
+
+from sqlalchemy.orm.attributes import flag_modified
+
 from app.database import get_db
-from app.models import Order, Policy, Firewall, PolicyVersion, ZoneAccessConfig
-from app.core.firewall_matcher import FirewallMatcher, NOT_PUSHED_REASONS
+from app.models import Order, Policy, PolicyVersion, OrderStatus
+from app.core.chain_planner import ChainPlanner
 from app.core.nat_analyzer import NATAnalyzer
-from app.core.policy_splitter_v2 import PolicySplitterV2, PolicyMergerV2
+from app.core.policy_splitter_v2 import PolicyMergerV2
+from app.schemas import  IgnorePlanRowRequest
 
 logger = logging.getLogger(__name__)
 
@@ -18,505 +29,357 @@ router = APIRouter(prefix="/api/workorders", tags=["preview"])
 
 
 @router.get("/{order_id}/preview")
-def get_preview_data(order_id: int, db: Session = Depends(get_db)):
+def get_preview_data(order_id: int, force_rebuild: bool = False, db: Session = Depends(get_db)):
     """
-    获取策略预览数据 V2
-    
-    核心逻辑：
-    1. 读取Excel策略（一行可能包含多个源/目的IP）
-    2. 拆分成单IP策略（笛卡尔积）
-    3. 每个单IP策略匹配防火墙
-    4. 按防火墙分组
-    5. 每个防火墙内执行三步合并
-    6. 添加序号
+    获取策略预览数据：
+    优先读取 user_modified → formatted_v2
+    不再兜底读取 Policy 表
     """
-    # 查询工单
     order = db.query(Order).filter(Order.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="工单不存在")
-    
-    # 查询所有策略
-    policies = db.query(Policy).filter(Policy.order_id == order_id).all()
-    
-    # 初始化
-    splitter = PolicySplitterV2(db)
-    nat_analyzer = NATAnalyzer(db)
-    matcher = FirewallMatcher(db)   # 用于在 NAT 分析时提供 match_context (区域矩阵 → 设备物理 zone)
-    
-    # 按防火墙分组
-    firewall_groups = {}  # {firewall_id: {'firewall': Firewall, 'policies': []}}
-    not_pushed_policies = []  # 不推送的策略
-    warnings = []
-    errors = []
 
-    # Pass 1+2 级联匹配状态 (D 方案 2026-06-19):
-    #   - boundary_snat_map[target_region] = {translated_src_ip, via_firewall, firewall_id}
-    #     边界墙 SNAT 转换登记, 给 Pass 2 替换 pending sp 的 src 用
-    #   - pending_inbound_sps: fw14 这种 inbound sp, src 命中某个 boundary internal 段,
-    #     先暂存, Pass 2 用 SNAT 后 src 重新上墙
-    boundary_snat_map: Dict[str, Dict] = {}
-    pending_inbound_sps: List[Dict] = []  # [{policy, sp, firewall, match_ctx, via_boundary, original_nat_info}] 
-
-    # 加载 user_modified 快照, 按 policy_id 索引"使用时间"(用户在 Edit 页编辑过的最新值)
-    # Policy 表无"使用时间"列, 数据保存在 user_modified 快照里(见 orders.py update_policies)
-    usage_time_by_id: dict[int, str] = {}
-    user_modified_version = db.query(PolicyVersion).filter(
+    # 1. 如果已有执行计划且不强制重建，直接返回
+    plan_version = db.query(PolicyVersion).filter(
         PolicyVersion.order_id == order_id,
-        PolicyVersion.version_type == 'user_modified'
+        PolicyVersion.version_type == "execution_plan"
     ).first()
-    if user_modified_version:
-        for p_dict in user_modified_version.data.get('policies', []):
-            pid = p_dict.get('id')
-            ut = p_dict.get('使用时间', '')
-            if pid is not None:
-                usage_time_by_id[pid] = ut
 
-    # 第一步：拆分所有策略为单IP策略
-    for policy in policies:
-        # 预计算一次 match_contexts (region 矩阵匹配结果), 在循环内为每个 split 复用
-        # 这样 NAT 分析可以直接拿到 device_source_zone / device_dest_zone, 不需要自己再算一次
-        try:
-            match_contexts = matcher.match_by_policy_context(policy) or []
-        except Exception as e:
-            logger.warning(f"FirewallMatcher.match_by_policy_context 异常 policy.id={policy.id}: {e}")
-            match_contexts = []
+    if plan_version and plan_version.data and not force_rebuild:
+        return plan_version.data
 
-        # 拆分成单IP策略
-        single_ip_policies = splitter.split_policy_to_single_ips(
-            policy.source_ip or "",
-            policy.dest_ip or "",
-            policy.service or "",
-            policy.action or "permit"
+    # 2. 优先 user_modified → formatted_v2
+    snapshot_data = None
+    used_version = None
+
+    # 优先 user_modified
+    user_modified = db.query(PolicyVersion).filter(
+        PolicyVersion.order_id == order_id,
+        PolicyVersion.version_type == "user_modified"
+    ).first()
+
+    if user_modified and user_modified.data and user_modified.data.get("policies"):
+        snapshot_data = user_modified.data["policies"]
+        used_version = "user_modified"
+
+    # 其次 formatted_v2
+    if snapshot_data is None:
+        formatted_v2 = db.query(PolicyVersion).filter(
+            PolicyVersion.order_id == order_id,
+            PolicyVersion.version_type == "formatted_v2"
+        ).first()
+        if formatted_v2 and formatted_v2.data and formatted_v2.data.get("policies"):
+            snapshot_data = formatted_v2.data["policies"]
+            used_version = "formatted_v2"
+    if snapshot_data is None:
+        raise HTTPException(status_code=400, detail="无可用策略数据（缺少 user_modified 或 formatted_v2）")
+
+    # 3. 转换为 Policy 对象用于执行计划计算
+    policies_to_plan = []
+    usage_time_by_id = {}
+
+    for p_dict in snapshot_data:
+        p_id = p_dict.get("id")
+        if p_id:
+            usage_time_by_id[p_id] = p_dict.get("使用时间") or ""
+
+        temp_policy = Policy(
+            id=p_id,
+            order_id=order_id,
+            source_system_name=p_dict.get("源端系统-环境-用途"),
+            source_ip=p_dict.get("源IP"),
+            device_source_zone=p_dict.get("源安全域"),
+            dest_system_name=p_dict.get("目的端系统-环境-用途"),
+            dest_ip=p_dict.get("目的IP"),
+            device_dest_zone=p_dict.get("目的安全域"),
+            service=p_dict.get("目的端口"),
+            usage_time=usage_time_by_id.get(p_id, "")
         )
+        policies_to_plan.append(temp_policy)
 
-        # 处理每个单IP策略
-        for sp in single_ip_policies:
-            # 如果不推送，加入不推送列表
-            if sp['not_pushed_reason']:
-                not_pushed_policies.append({
-                    "original_policy_id": policy.id,
-                    "source_system_name": policy.source_system_name,
-                    "source_ip": sp['source_ip'],
-                    "dest_system_name": policy.dest_system_name,
-                    "dest_ip": sp['dest_ip'],
-                    "service": sp['service'],
-                    "action": sp['action'],
-                    "not_pushed_reason": sp['not_pushed_reason'],
-                    "使用时间": usage_time_by_id.get(policy.id, ''),
-                })
-                continue
+    # 4. 执行计划计算
+    planner = ChainPlanner(db)
+    ctx = planner.generate_chain_execution_plan(policies_to_plan, usage_time_by_id)
+    nat_analyzer = NATAnalyzer(db)
 
-            # 防火墙匹配 → NAT 分析 → 上墙 / 暂存 pending
-            # D 方案 (Pass 1 + Pass 2 级联匹配):
-            #   - boundary fw + SNAT: 登记 SNAT 转换, fw 自己保留原始 src 上墙 (策略匹配在 SNAT 前)
-            #   - inbound 方向 + src 命中某个 boundary fw internal 段: 暂存 pending
-            #     (本墙物理看不到原始 src, 物理看到的是 SNAT 后 src, Pass 2 替换)
-            #   - 其他 (fw outbound, fw 直连 inbound): 直接用原始 src 上墙
-            firewall = sp['firewall']
-            if firewall.id not in firewall_groups:
-                firewall_groups[firewall.id] = {
-                    'firewall': firewall,
-                    'policies': []
-                }
-
-            match_ctx = next(
-                (m for m in match_contexts if m.get('firewall_id') == firewall.id),
-                None
-            )
-            nat_info = nat_analyzer.analyze_policy_with_context(
-                sp['source_ip'],
-                sp['dest_ip'],
-                firewall,
-                match_context=match_ctx
-            )
-
-            # 收集警告
-            if nat_info["warnings"]:
-                for warning in nat_info["warnings"]:
-                    warnings.append(f"策略 {policy.id} ({sp['source_ip']} → {sp['dest_ip']}): {warning}")
-
-            # 情况 1: 边界墙 + SNAT → 登记 SNAT 转换, fw 自己用原始 src 上墙
-            if firewall.is_zone_boundary and nat_info.get("need_nat") and nat_info.get("nat_type") == "SNAT":
-                translated_src_ip = nat_info["snat_address"]
-                # target_region = SNAT 转换后 src 落在的区域, 下游 fw 用它做 key 找转换
-                if nat_info.get("source_zone") == "external":
-                    # 入向: 转换后 src 进入 fw 的 internal 一侧, 下游 fw (同 covered_region) 看到 src=转换后 IP
-                    target_region = firewall.covered_region or firewall.region
-                else:
-                    # 出向: 转换后 src 落在 fw 的 external 一侧, 下游 fw (对方 covered_region) 看到 src=转换后 IP
-                    cfg = db.query(ZoneAccessConfig).filter_by(
-                        firewall_id=firewall.id,
-                        dest_zone=firewall.external_zone_name
-                    ).first()
-                    if not cfg:
-                        # Fallback 1: zone_name 命名不一致 (e.g. fw.external_zone_name="untrust" vs cfg.dest_zone="生产区"),
-                        # 找 source_zone=本墙 covered_region 的 cfg (出向 cfg 的 source = 本墙, dest = 对方)
-                        all_cfgs = db.query(ZoneAccessConfig).filter_by(firewall_id=firewall.id).all()
-                        own_region = firewall.covered_region or firewall.region
-                        for c in all_cfgs:
-                            if c.source_zone == own_region:
-                                cfg = c
-                                break
-                        # Fallback 2: substring 匹配 (兼容更复杂的命名不一致)
-                        if not cfg:
-                            for c in all_cfgs:
-                                if (firewall.external_zone_name and firewall.external_zone_name in c.dest_zone) \
-                                   or (c.dest_zone and c.dest_zone in firewall.external_zone_name):
-                                    cfg = c
-                                    break
-                    # target_region = 对方 covered_region (出向 SNAT 后 src 进入对方 region)
-                    # 找不到 cfg 时不能再 fallback 到 firewall.covered_region (那是同侧, 不是对方!)
-                    # → 这种情况 SNAT 转换对下游 fw 无意义, 但仍登记, 由 preview 端排查告警
-                    target_region = cfg.dest_zone if cfg else firewall.covered_region or firewall.region
-
-                boundary_snat_map[target_region] = {
-                    "translated_src_ip": translated_src_ip,
-                    "via_firewall": {"id": firewall.id, "name": firewall.name},
-                    "firewall_id": firewall.id,
-                }
-                # 边界墙自己上墙, src = 原始 IP (策略匹配在 SNAT 转换前)
-                firewall_groups[firewall.id]['policies'].append({
-                    'original_policy_id': policy.id,
-                    'source_system_name': policy.source_system_name,
-                    'source_ip': sp['source_ip'],
-                    'dest_system_name': policy.dest_system_name,
-                    'dest_ip': sp['dest_ip'],
-                    'service': sp['service'],
-                    'action': sp['action'],
-                    'direction': sp['direction'],
-                    'nat_info': nat_info,
-                    '使用时间': usage_time_by_id.get(policy.id, ''),
-                    'original_data': {
-                        'source_system_name': policy.source_system_name,
-                        'dest_system_name': policy.dest_system_name
-                    }
-                })
-                continue
-
-            # 情况 2: inbound sp → 判定 src 是否需要走 Pass 2 SNAT 透传 (D 方案严格版)
-            #   - src 在某 boundary fw 管辖范围 (正向 internal 或反向 external):
-            #     暂存 pending, Pass 2 用 boundary fw 对应方向的 SNAT 池替换
-            #   - src 不在任何 boundary 管辖范围: 没人 NAT 它 → unmatched
-            #     (硬铁律: 防火墙只认当前进到接口的包, 没 SNAT 转换的 src 不能强行上墙)
-            if sp['direction'] == 'inbound':
-                boundary_match = _find_boundary_fw_for_src(sp['source_ip'], firewall, db)
-                if boundary_match:
-                    pending_inbound_sps.append({
-                        'policy': policy,
-                        'sp': sp,
-                        'firewall': firewall,
-                        'match_ctx': match_ctx,
-                        'boundary_match': boundary_match,
-                        'original_nat_info': nat_info,
-                    })
-                else:
-                    not_pushed_policies.append({
-                        'original_policy_id': policy.id,
-                        'source_system_name': policy.source_system_name,
-                        'source_ip': sp['source_ip'],
-                        'dest_system_name': policy.dest_system_name,
-                        'dest_ip': sp['dest_ip'],
-                        'service': sp['service'],
-                        'action': sp['action'],
-                        'not_pushed_reason': f'策略 {policy.id} src={sp["source_ip"]} 不在任何 boundary fw 管辖范围, 无 SNAT 透传可应用',
-                        '使用时间': usage_time_by_id.get(policy.id, ''),
-                    })
-                continue
-
-            # 情况 3: 其他 (fw outbound / fw 直连 inbound) → 直接用原始 src 上墙
-            firewall_groups[firewall.id]['policies'].append({
-                'original_policy_id': policy.id,
-                'source_system_name': policy.source_system_name,
-                'source_ip': sp['source_ip'],
-                'dest_system_name': policy.dest_system_name,
-                'dest_ip': sp['dest_ip'],
-                'service': sp['service'],
-                'action': sp['action'],
-                'direction': sp['direction'],
-                'nat_info': nat_info,
-                '使用时间': usage_time_by_id.get(policy.id, ''),
-                'original_data': {
-                    'source_system_name': policy.source_system_name,
-                    'dest_system_name': policy.dest_system_name
-                }
-            })
-
-    # Pass 2: 处理 pending inbound sp, 用 SNAT 后 src 重新上墙
-    # 严格按用户级联模型:
-    #   - src 在 boundary fw 管辖范围 (正向 internal 或反向 external)
-    #     → Pass 2 用 boundary fw 对应方向 SNAT 池替换 src
-    #   - src 不在 boundary 范围 (已经在情况 2 直接 unmatched, 不会进 pending)
-    for pending in pending_inbound_sps:
-        policy = pending['policy']
-        sp = pending['sp']
-        firewall = pending['firewall']
-        match_ctx = pending['match_ctx']
-        boundary_match = pending['boundary_match']
-        boundary_fw = boundary_match['boundary_fw']
-
-        # key 必须用 下游 fw 的 covered_region (跟 fw6 登记 SNAT 用的 target_region 一致),
-        # fw6 SNAT 登记到 boundary_snat_map[对方 region] (cfg.dest_zone),
-        # 当前 fw inbound 时应该命中这个 key.
-        target_region_key = firewall.covered_region or firewall.region
-        snat_info = boundary_snat_map.get(target_region_key)
-
-        if snat_info and snat_info['firewall_id'] != firewall.id:
-            # Pass 2: 用 SNAT 后 src 替换, 重算 nat_info
-            translated_src = snat_info['translated_src_ip']
-            new_nat_info = nat_analyzer.analyze_policy_with_context(
-                translated_src,
-                sp['dest_ip'],
-                firewall,
-                match_context=match_ctx
-            )
-            new_nat_info = {
-                **new_nat_info,
-                'need_nat': False,
-                'nat_type': None,
-                'warnings': [w for w in new_nat_info.get('warnings', []) if 'SNAT地址池' not in w],
-                'snat_address': translated_src,
-                'via_firewall': snat_info['via_firewall'],
-            }
-            firewall_groups[firewall.id]['policies'].append({
-                'original_policy_id': policy.id,
-                'source_system_name': policy.source_system_name,
-                'source_ip': translated_src,
-                'dest_system_name': policy.dest_system_name,
-                'dest_ip': sp['dest_ip'],
-                'service': sp['service'],
-                'action': sp['action'],
-                'direction': sp['direction'],
-                'nat_info': new_nat_info,
-                '使用时间': usage_time_by_id.get(policy.id, ''),
-                'original_data': {
-                    'source_system_name': policy.source_system_name,
-                    'dest_system_name': policy.dest_system_name
-                }
-            })
-        else:
-            # Fallback: boundary_match 找到但 SNAT 转换没登记 (e.g. boundary fw 自己的 inbound sp
-            # 应该走情况 1, 但万一漏到 pending). 用 boundary_match 自带的 snat_pool 兜底.
-            if boundary_match.get('snat_pool') and boundary_match['snat_pool']:
-                translated_src = boundary_match['snat_pool']
-                new_nat_info = nat_analyzer.analyze_policy_with_context(
-                    translated_src,
-                    sp['dest_ip'],
-                    firewall,
-                    match_context=match_ctx
-                )
-                new_nat_info = {
-                    **new_nat_info,
-                    'need_nat': False,
-                    'nat_type': None,
-                    'warnings': [w for w in new_nat_info.get('warnings', []) if 'SNAT地址池' not in w],
-                    'snat_address': translated_src,
-                    'via_firewall': {'id': boundary_fw.id, 'name': boundary_fw.name},
-                }
-                firewall_groups[firewall.id]['policies'].append({
-                    'original_policy_id': policy.id,
-                    'source_system_name': policy.source_system_name,
-                    'source_ip': translated_src,
-                    'dest_system_name': policy.dest_system_name,
-                    'dest_ip': sp['dest_ip'],
-                    'service': sp['service'],
-                    'action': sp['action'],
-                    'direction': sp['direction'],
-                    'nat_info': new_nat_info,
-                    '使用时间': usage_time_by_id.get(policy.id, ''),
-                    'original_data': {
-                        'source_system_name': policy.source_system_name,
-                        'dest_system_name': policy.dest_system_name
-                    }
-                })
-            else:
-                # Fallback 2: boundary fw 没配对应方向 SNAT 池, 没法做 SNAT 透传 → unmatched
-                not_pushed_policies.append({
-                    'original_policy_id': policy.id,
-                    'source_system_name': policy.source_system_name,
-                    'source_ip': sp['source_ip'],
-                    'dest_system_name': policy.dest_system_name,
-                    'dest_ip': sp['dest_ip'],
-                    'service': sp['service'],
-                    'action': sp['action'],
-                    'not_pushed_reason': f'策略 {policy.id} src={sp["source_ip"]} 边界 {boundary_fw.name} 无 {boundary_match["direction"]} SNAT 池配置, 跳过',
-                    '使用时间': usage_time_by_id.get(policy.id, ''),
-                })
-
-    # 第二步：每个防火墙内执行三步合并
-    for firewall_id in firewall_groups:
-        policies_to_merge = firewall_groups[firewall_id]['policies']
-
-        # 执行合并
-        merged = PolicyMergerV2.merge_policies(policies_to_merge)
-
-        # 添加序号
-        for idx, p in enumerate(merged, start=1):
-            p['sequence'] = idx
-
-            # 重新生成 NAT 策略行 (合并后, 只 boundary fw 自己生成 SNAT 行)
-            # D 方案: 保留 Pass 2 塞进 nat_info 的 snat_address / via_firewall (fw14 的 SNAT 透传标识)
-            if p.get('original_data'):
-                # 第二阶段 (合并后) 不再能直接拿到原始 match_context, 让 nat_analyzer 走内部降级流即可
-                nat_info = p.get('nat_info') or nat_analyzer.analyze_policy_with_context(
-                    p['source_ip'].split('\n')[0],
-                    p['dest_ip'].split('\n')[0],
-                    firewall_groups[firewall_id]['firewall'],
-                    match_context=None
-                )
-                # 保留 Pass 2 塞的 SNAT 透传信息 (D 方案 fw14 的 nat_info.snat_address + via_firewall)
-                preserved_snat = p.get('nat_info', {}).get('snat_address')
-                preserved_via = p.get('nat_info', {}).get('via_firewall')
-                p['nat_info'] = nat_info
-                if preserved_snat:
-                    p['nat_info']['snat_address'] = preserved_snat
-                if preserved_via:
-                    p['nat_info']['via_firewall'] = preserved_via
-                # 只 boundary fw 自己生成 SNAT 转换行 (后游墙 sp.source_ip 已经是 SNAT 后 IP, 不渲染)
-                if nat_info.get('nat_type') == 'SNAT':
-                    p['nat_policies'] = _generate_nat_policies(p, nat_info)
-                else:
-                    p['nat_policies'] = []
-
-        firewall_groups[firewall_id]['policies'] = merged
-
-    # 第三步：为不推送策略添加序号
-    for idx, p in enumerate(not_pushed_policies, start=1):
-        p['sequence'] = idx
-
-    # 转换为列表格式
+    # 5. 构建渲染数据（带 UUID）
     firewalls_list = []
-    for firewall_id, group in firewall_groups.items():
+    for firewall_id, group in ctx.firewall_groups.items():
+        merged = PolicyMergerV2.merge_policies(group["policies"])
+        for idx, p in enumerate(merged, start=1):
+            p["sequence"] = idx
+            p["row_uuid"] = str(uuid.uuid4())
+            p["is_ignored"] = False
+            p["nat_policies"] = _build_nat_policies(p, group["firewall"], nat_analyzer)
+
         firewalls_list.append({
-            "firewall_id": group['firewall'].id,
-            "firewall_name": group['firewall'].name,
+            "firewall_id": group["firewall"].id,
+            "firewall_name": group["firewall"].name,
             "firewall": {
-                "id": group['firewall'].id,
-                "name": group['firewall'].name,
-                "alias": group['firewall'].alias,
-                "type": group['firewall'].type,
-                "management_ip": group['firewall'].management_ip,
-                "region": group['firewall'].region,
-                "covered_region": group['firewall'].covered_region,
-                "local_zone_name": group['firewall'].local_zone_name,
-                "external_zone_name": group['firewall'].external_zone_name,
-                "is_zone_boundary": group['firewall'].is_zone_boundary,
-                "auto_push": group['firewall'].auto_push,
-                "push_contact": group['firewall'].push_contact
+                "id": group["firewall"].id,
+                "name": group["firewall"].name,
+                "alias": group["firewall"].alias,
+                "type": group["firewall"].type,
+                "management_ip": group["firewall"].management_ip,
+                "belong_region": group["firewall"].belong_region,
+                "is_zone_boundary": group["firewall"].is_zone_boundary,
+                "auto_push": group["firewall"].auto_push,
             },
-            "policies": group['policies']
+            "policies": merged,
         })
-    
-    return {
+
+    for idx, p in enumerate(ctx.not_pushed, start=1):
+        p["sequence"] = idx
+        p["row_uuid"] = str(uuid.uuid4())
+
+    plan_data = {
         "order": {
             "id": order.id,
             "order_no": order.order_no,
             "title": order.title,
             "status": order.status,
-            "created_at": order.created_at.isoformat() if order.created_at else None
+            "created_at": order.created_at.isoformat() if order.created_at else None,
         },
         "firewall_groups": firewalls_list,
-        "unmatched_policies": not_pushed_policies,
-        "warnings": warnings,
-        "errors": errors
+        "unmatched_policies": ctx.not_pushed,
+        "warnings": ctx.warnings,
+        "errors": [],
+        "used_version": used_version,
     }
 
+    # 6. 保存执行计划
+    if not plan_version:
+        plan_version = PolicyVersion(order_id=order_id, version_type="execution_plan", data=plan_data)
+        db.add(plan_version)
+    else:
+        plan_version.data = plan_data
+        flag_modified(plan_version, "data")
 
-def _generate_nat_policies(
+    db.commit()
+    return plan_data
+
+
+import re
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from datetime import datetime
+import logging
+
+from app.database import get_db
+from app.models import Order, Policy, PolicyVersion, OrderStatus
+
+logger = logging.getLogger(__name__)
+
+
+@router.post("/{order_id}/commit")
+def commit_order_policies(order_id: int, db: Session = Depends(get_db)):
+    """
+    提交工单：将执行计划快照写入 policies 物理表。
+    安全策略IP原样写入，仅针对边界墙额外生成 NAT 映射关系。
+    """
+    order = db.query(Order).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="工单不存在")
+
+    plan_version = db.query(PolicyVersion).filter(
+        PolicyVersion.order_id == order_id,
+        PolicyVersion.version_type == "execution_plan"
+    ).first()
+
+    if not plan_version or not plan_version.data:
+        raise HTTPException(status_code=400, detail="未找到执行计划，请先前往预览页检查策略。")
+
+    plan_data = plan_version.data
+
+    if plan_data.get("unmatched_policies"):
+        raise HTTPException(status_code=400, detail="存在未匹配防火墙的策略，无法提交，请先修改源/目的IP。")
+
+    try:
+        # 清除历史脏记录
+        db.query(Policy).filter(Policy.order_id == order_id).delete()
+        policies_to_insert = []
+
+        # 遍历执行计划中的每一个防火墙
+        for fw_group in plan_data.get("firewall_groups", []):
+            fw_id = fw_group["firewall_id"]
+
+            for p_dict in fw_group.get("policies", []):
+
+                # 1. 直接读取执行计划中算好的 source_ip，坚决不篡改！
+                final_source_ip = str(p_dict.get("source_ip", ""))
+                source_snat_mapping = None
+
+                nat_info = p_dict.get("nat_info") or {}
+
+                # 2. 只有当前墙是真正的【边界墙】（执行 SNAT）时，才写入映射关系
+                if nat_info.get("nat_type") == "SNAT" and nat_info.get("snat_address"):
+                    snat_address = nat_info.get("snat_address")
+
+                    # 为了映射的准确性，优先取 original_source_ip，没有则取 final_source_ip
+                    original_ip_for_mapping = p_dict.get("original_source_ip") or final_source_ip
+
+                    mappings = []
+                    # 按换行符或逗号切割多个 IP
+                    ip_list = [ip.strip() for ip in re.split(r'[\n,]', original_ip_for_mapping) if ip.strip()]
+
+                    # 组装关系：原IP-->NAT地址
+                    for ip in ip_list:
+                        mappings.append(f"{ip}-->{snat_address}")
+
+                    source_snat_mapping = "\n".join(mappings) if mappings else None
+
+                # 获取前端打的忽略（软删除）标记
+                is_ignored = p_dict.get("is_ignored", False)
+                final_push_status = "ignored" if is_ignored else "pending"
+
+                new_policy = Policy(
+                    order_id=order_id,
+                    firewall_id=fw_id,
+                    source_system_name=p_dict.get("source_system_name"),
+                    dest_system_name=p_dict.get("dest_system_name"),
+
+                    # 写入数据库（安全策略IP 与 NAT映射 分离）
+                    source_ip=final_source_ip,
+                    source_snat_ip=source_snat_mapping,
+
+                    dest_ip=p_dict.get("dest_ip"),
+                    service=p_dict.get("service"),
+                    device_source_zone=p_dict.get("device_source_zone") or p_dict.get("src_zone_name") or "Untrust",
+                    device_dest_zone=p_dict.get("device_dest_zone") or p_dict.get("dst_zone_name") or "Trust",
+                    usage_time=p_dict.get("usage_time", ""),
+                    push_status=final_push_status,
+                    created_at=datetime.now()
+                )
+                policies_to_insert.append(new_policy)
+
+        if policies_to_insert:
+            db.add_all(policies_to_insert)
+
+        # 推进工单状态
+        if hasattr(OrderStatus, 'pending_push'):
+            order.status = OrderStatus.pending_push
+
+        db.commit()
+
+        return {
+            "message": "执行计划已成功入库",
+            "inserted_count": len(policies_to_insert)
+        }
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"工单 {order_id} 策略入库失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"数据入库失败: {str(e)}")
+@router.put("/{order_id}/plan/ignore")
+def toggle_plan_row_ignore(order_id: int, req: IgnorePlanRowRequest, db: Session = Depends(get_db)):
+    """
+    修改执行计划：根据前端传递的 row_uuid 软删除或恢复对应的策略行
+    """
+    plan_version = db.query(PolicyVersion).filter(
+        PolicyVersion.order_id == order_id,
+        PolicyVersion.version_type == "execution_plan"
+    ).first()
+
+    if not plan_version or not plan_version.data:
+        raise HTTPException(status_code=404, detail="执行计划不存在，请先前往预览页生成策略。")
+
+    data = plan_version.data
+    row_found = False
+
+    # 遍历防火墙大组，找到对应的 uuid 修改状态
+    for fw_group in data.get("firewall_groups", []):
+        for p in fw_group.get("policies", []):
+            if p.get("row_uuid") == req.row_uuid:
+                p["is_ignored"] = req.ignore
+                row_found = True
+                break
+        if row_found:
+            break
+
+    if not row_found:
+        raise HTTPException(status_code=404, detail="未找到对应的策略行，请刷新页面重试。")
+
+    # 标记 JSON 脏数据，保存修改
+    flag_modified(plan_version, "data")
+    db.commit()
+
+    return {"message": "状态已更新", "row_uuid": req.row_uuid, "is_ignored": req.ignore}
+
+def _build_nat_policies(
+    merged_policy: Dict,
+    firewall,
+    nat_analyzer: NATAnalyzer,
+) -> List[Dict]:
+    """
+    渲染 NAT 转换行 (SNAT 透传 + 自身 SNAT)
+
+    2026-06-22 重构: 区分两种 SNAT 行
+      - "SNAT": boundary fw 自己转换 (蓝行)
+      - "PASS_THROUGH": 下游 fw 被上游 boundary SNAT 透传 (绿行, 显示原 src IP)
+    """
+    if not merged_policy.get("original_data"):
+        return []
+
+    rows = []
+
+    # 情形 1: Pass 2 SNAT 透传 (D 方案) — merged_policy.nat_info 里有 via_firewall + snat_address
+    nat_info = merged_policy.get("nat_info") or {}
+    if nat_info.get("via_firewall") and nat_info.get("snat_address"):
+        via = nat_info["via_firewall"]
+        original_src = merged_policy.get("original_source_ip", merged_policy["source_ip"])
+        rows.append({
+            "type": "PASS_THROUGH",
+            "source_zone": merged_policy.get("source_system_name") or "-",
+            "source_ip": nat_info["snat_address"],  # 透传后 src (上游 boundary SNAT 后)
+            "dest_zone": merged_policy.get("dest_system_name") or "-",
+            "dest_ip": merged_policy["dest_ip"],
+            "service": merged_policy["service"],
+            "action": merged_policy.get("action", "permit"),
+            "via_firewall": via,
+            "original_source_ip": original_src,  # 2026-06-22 透传原 IP 给前端展示
+        })
+
+    # 情形 2: boundary fw 自身需要 SNAT 转换 (蓝行, 显示转换后 src)
+    nat_info_for_self = nat_analyzer.analyze_policy_with_context(
+        merged_policy["source_ip"].split("\n")[0],
+        merged_policy["dest_ip"].split("\n")[0],
+        firewall,
+        match_context=None,
+    )
+    # 保留 Pass 2 塞的 SNAT 透传信息 (即使自身不需要 SNAT 也要透传这俩字段给前端)
+    merged_policy["nat_info"] = nat_info_for_self
+    if nat_info.get("snat_address"):
+        merged_policy["nat_info"]["snat_address"] = nat_info["snat_address"]
+    if nat_info.get("via_firewall"):
+        merged_policy["nat_info"]["via_firewall"] = nat_info["via_firewall"]
+
+    if nat_info_for_self.get("nat_type") == "SNAT" and not rows:
+        rows.extend(_generate_snat_row(merged_policy, nat_info_for_self))
+
+    return rows
+
+
+# 向后兼容别名 (test_merger_pass_through_list 等老测试用旧名)
+_generate_nat_policies = _build_nat_policies
+
+
+def _generate_snat_row(
     original_policy: Dict,
     nat_info: Dict,
 ) -> List[Dict]:
     """
-    生成 NAT 转换后的策略行（SNAT-only）
+    生成 SNAT 转换行 (源 IP 转换)
 
-    C 方案 (2026-06-19): 简化
-    - 项目已决定取消 DNAT 分析, 故只会生成 SNAT 转换行
-    - 后游墙 (跨 boundary fw SNAT 透传) 的 sp.source_ip 已被替换成 SNAT 后 IP,
-      preview 主循环只对 boundary fw 自己 (nat_info.nat_type=='SNAT') 调用此函数,
-      所以这里只生成 SNAT 行, 不再处理 PASS_THROUGH 行 (pass_through 参数已移除)
+    铁律: SNAT 永远换 src IP (不管入向出向), dst 不变
     """
-    nat_policies = []
-
-    if nat_info["nat_type"] == "SNAT":
-        # SNAT：源IP转换（在本墙做 NAT）
-        nat_policies.append({
+    return [
+        {
             "type": "SNAT",
             "source_zone": nat_info.get("source_zone_name") or nat_info["source_zone"],
             "source_ip": nat_info["snat_address"] or "[需要配置SNAT地址]",
             "dest_zone": nat_info.get("dest_zone_name") or nat_info["dest_zone"],
             "dest_ip": original_policy["dest_ip"],
             "service": original_policy["service"],
-            "action": original_policy["action"]
-        })
-    # DNAT / BOTH 分支已删除：项目不再分析 DNAT
-    # PASS_THROUGH 分支已删除 (C 方案): 后游墙 sp.source_ip 直接是 SNAT 后 IP, 不渲染
-
-    return nat_policies
-
-
-def _find_boundary_fw_for_src(src_ip: str, current_fw: Firewall, db: Session) -> Optional[Dict]:
-    """
-    找 src_ip 关联的 boundary fw + SNAT 池 (用于 D 方案 Pass 2 透传).
-
-    D 方案严格版: 支持正反向 SNAT 透传.
-
-    业务场景 (按用户级联模型):
-      正向访问: src 在 boundary fw internal 段 (src 在 boundary 后面, boundary outbound SNAT)
-      反向访问: src 在 boundary fw external 段 (src 在 boundary 前面, boundary inbound SNAT)
-      这两种情况下, 当前 fw 物理上看到的 src 应该是 SNAT 后 IP (Pass 2 替换)
-
-    Returns:
-      None — 没命中 (sp.src 不在任何 boundary fw 管辖范围)
-      {"boundary_fw": Firewall, "snat_pool": str, "direction": "outbound"|"inbound"}
-        - snat_pool: 命中的 boundary fw 对应方向的 SNAT 池
-        - direction: 该 boundary fw 做的 SNAT 方向 (用于 fw6 区分入/出)
-    """
-    if not src_ip or src_ip.strip().lower() in ('any', '0.0.0.0'):
-        return None
-    try:
-        src_ip_obj = ipaddress.ip_address(src_ip)
-    except ValueError:
-        return None
-
-    other_boundary_fws = db.query(Firewall).filter(
-        Firewall.id != current_fw.id,
-        Firewall.is_zone_boundary == 1,
-    ).all()
-
-    for other_fw in other_boundary_fws:
-        # 正向: src 在 boundary fw internal 段 (boundary outbound SNAT)
-        cidr_text = other_fw.internal_protected_ips or ''
-        for line in cidr_text.split('\n'):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                if src_ip_obj in ipaddress.ip_network(line, strict=False):
-                    return {
-                        'boundary_fw': other_fw,
-                        'snat_pool': other_fw.outbound_snat_pool,
-                        'direction': 'outbound',
-                    }
-            except:
-                continue
-        # 反向: src 在 boundary fw external 段 (boundary inbound SNAT)
-        cidr_text = other_fw.external_protected_ips or ''
-        for line in cidr_text.split('\n'):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                if src_ip_obj in ipaddress.ip_network(line, strict=False):
-                    return {
-                        'boundary_fw': other_fw,
-                        'snat_pool': other_fw.inbound_snat_pool,
-                        'direction': 'inbound',
-                    }
-            except:
-                continue
-    return None
-
-
-# _detect_cross_fw_pass_through 已删除 (D 方案 2026-06-19):
-# 原函数试图在单遍 splitter + preview 中修补 NAT 透传, 但误把同 region 的前游 fw
-# (如 fw7) 当成 boundary fw (fw6) 的下游处理, 把 fw7 的 src 也替换成 SNAT 后 IP.
-
+            "action": original_policy["action"],
+        }
+    ]

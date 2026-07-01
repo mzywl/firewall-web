@@ -8,7 +8,10 @@ import { Preview } from './pages/Preview';
 import { Push } from './pages/Push';
 import { SnapshotDetail } from './pages/SnapshotDetail';
 import FirewallManagement from './pages/FirewallManagement';
-import FirewallForm from './pages/FirewallForm';
+import BasicFirewallForm from './pages/BasicFirewallForm';
+import FirewallDetail from './pages/FirewallDetail';
+import FirewallZones from './pages/FirewallZones';
+import FirewallAccessConfigs from './pages/FirewallAccessConfigs';
 import ZoneAccessConfig from './pages/ZoneAccessConfig';
 
 const queryClient = new QueryClient({
@@ -26,15 +29,23 @@ function App() {
       <BrowserRouter>
         <Layout>
           <Routes>
+            {/* 工单相关 */}
             <Route path="/" element={<Home />} />
             <Route path="/upload" element={<Upload />} />
             <Route path="/order/:orderId/edit" element={<Edit />} />
             <Route path="/order/:orderId/preview" element={<Preview />} />
             <Route path="/order/:orderId/push" element={<Push />} />
             <Route path="/snapshot/:snapshotId" element={<SnapshotDetail />} />
+
+            {/* 防火墙管理 — 子路由结构 (Option C 独立路由) */}
             <Route path="/firewalls" element={<FirewallManagement />} />
-            <Route path="/firewalls/new" element={<FirewallForm />} />
-            <Route path="/firewalls/:id/edit" element={<FirewallForm />} />
+            <Route path="/firewalls/new" element={<BasicFirewallForm />} />
+            <Route path="/firewalls/:id" element={<FirewallDetail />} />
+            <Route path="/firewalls/:id/edit" element={<BasicFirewallForm />} />
+            <Route path="/firewalls/:id/zones" element={<FirewallZones />} />
+            <Route path="/firewalls/:id/access" element={<FirewallAccessConfigs />} />
+
+            {/* 全局跨区配置 (按防火墙聚合, 只读 + 跳转 per-firewall 编辑) */}
             <Route path="/zone-access" element={<ZoneAccessConfig />} />
           </Routes>
         </Layout>

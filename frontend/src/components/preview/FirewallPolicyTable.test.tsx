@@ -1,7 +1,7 @@
 // FirewallPolicyTable 组件测试 - 验证关键渲染场景
 // 这个组件最容易碎: 字段名错一列 / source_zone_name vs source_zone 用错 / PASS_THROUGH 渲染漏
-import { describe, it, expect } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { describe, it, expect, vi } from 'vitest'
+import { render, screen, fireEvent } from '@testing-library/react'
 import { FirewallPolicyTable } from './FirewallPolicyTable'
 import type { FirewallGroup, PreviewPolicy, NATPolicy, NATInfo } from '../../types'
 
@@ -20,6 +20,8 @@ const makeNATInfo = (over: Partial<NATInfo> = {}): NATInfo => ({
 })
 
 const makePolicy = (over: Partial<PreviewPolicy> = {}): PreviewPolicy => ({
+  row_uuid: 'uuid-1',          // Execution Plan (2026-06-28): 后端 uuid.uuid4()
+  is_ignored: false,           // Execution Plan: 软删除标记, 默认 false
   id: 1,
   sequence: 1,
   source_zone: '业务A',
@@ -32,7 +34,7 @@ const makePolicy = (over: Partial<PreviewPolicy> = {}): PreviewPolicy => ({
   nat_policies: [],
   使用时间: '长期',
   ...over,
-})
+});
 
 const makeGroup = (over: Partial<FirewallGroup> = {}): FirewallGroup => ({
   firewall: {
@@ -41,9 +43,9 @@ const makeGroup = (over: Partial<FirewallGroup> = {}): FirewallGroup => ({
     alias: '测试防火墙',
     type: 'fortinet',
     management_ip: '10.99.99.1',
-    region: '测试区',
+    belong_region: '测试区',
+    is_zone_boundary: 0,
     auto_push: 0,
-    push_contact: 'admin',
   },
   policies: [],
   ...over,
@@ -58,7 +60,7 @@ describe('FirewallPolicyTable', () => {
     expect(screen.getByText('10.1.1.1')).toBeInTheDocument()
     expect(screen.getByText('10.2.2.2')).toBeInTheDocument()
     expect(screen.getByText('443')).toBeInTheDocument()
-    expect(screen.getByText('permit')).toBeInTheDocument()
+    // C4: 动作列已删, 不再测 'permit' 单元格; action 字段仍存在但不在表里
   })
 
   it('prefers source_zone_name (业务名) over source_zone (程序值)', () => {
@@ -140,6 +142,48 @@ describe('FirewallPolicyTable', () => {
     expect(container.querySelector('.bg-emerald-50')).toBeInTheDocument()
   })
 
+  it('PASS_THROUGH shows "原 src=..." when original_source_ip differs from source_ip (C3)', () => {
+    // source_ip 是 SNAT 后的地址, original_source_ip 是流量真实原始 IP
+    const natPolicies: NATPolicy[] = [
+      {
+        type: 'PASS_THROUGH',
+        source_zone: '内网',
+        source_ip: '198.51.100.5',     // SNAT 后 (透传到下游墙的源)
+        original_source_ip: '10.1.1.7', // 流量真实原 IP
+        dest_zone: 'DMZ',
+        dest_ip: '10.2.2.2',
+        service: '443',
+        action: 'permit',
+        via_firewall: { id: 99, name: '前置墙fw1' },
+      },
+    ]
+    const policy = makePolicy({ nat_policies: natPolicies })
+    render(<FirewallPolicyTable group={makeGroup({ policies: [policy] })} />)
+    // 两个 IP 都要在文档里, 且 "原 src=..." 标签存在
+    expect(screen.getByText('198.51.100.5')).toBeInTheDocument()
+    expect(screen.getByText(/原 src=10\.1\.1\.7/)).toBeInTheDocument()
+  })
+
+  it('PASS_THROUGH 不显示 "原 src=..." 当 original_source_ip 跟 source_ip 相同', () => {
+    // 兼容历史数据 / 退化情况: original_source_ip 未透传时隐藏标签
+    const natPolicies: NATPolicy[] = [
+      {
+        type: 'PASS_THROUGH',
+        source_zone: '内网',
+        source_ip: '10.1.1.7',
+        original_source_ip: '10.1.1.7', // 跟 source_ip 一样, 不该显示
+        dest_zone: 'DMZ',
+        dest_ip: '10.2.2.2',
+        service: '443',
+        action: 'permit',
+        via_firewall: { id: 99, name: '前置墙fw1' },
+      },
+    ]
+    const policy = makePolicy({ nat_policies: natPolicies })
+    render(<FirewallPolicyTable group={makeGroup({ policies: [policy] })} />)
+    expect(screen.queryByText(/原 src=/)).not.toBeInTheDocument()
+  })
+
   it('renders warnings row (yellow) when nat_info.warnings has entries', () => {
     const policy = makePolicy({
       nat_info: makeNATInfo({ warnings: ['IP 不在任何 protected_ips 段', '请人工确认'] }),
@@ -165,5 +209,68 @@ describe('FirewallPolicyTable', () => {
     )
     // 表格里有 NBSP, 而不是真的空字符串
     expect(container.textContent).toContain('\u00A0')
+  })
+
+  it('C4/C9: 渲染删除按钮当 onToggleIgnore 传入 + is_ignored=false', () => {
+    const onToggle = vi.fn()
+    const policy = makePolicy({ row_uuid: 'uuid-42', is_ignored: false })
+    render(
+      <FirewallPolicyTable
+        group={makeGroup({ policies: [policy] })}
+        onToggleIgnore={onToggle}
+      />
+    )
+    // 删除按钮 (红, Trash2) — 用 row_uuid 寻址
+    const btn = screen.getByTestId('delete-policy-uuid-42')
+    expect(btn).toBeInTheDocument()
+    fireEvent.click(btn)
+    // 第二个参数是 currentIgnoreStatus, 调用方拿到后自己做反转
+    expect(onToggle).toHaveBeenCalledWith('uuid-42', false)
+  })
+
+  it('C9: 不渲染任何操作按钮当 onToggleIgnore 缺省 (只读模式)', () => {
+    const policy = makePolicy({ row_uuid: 'uuid-99' })
+    render(<FirewallPolicyTable group={makeGroup({ policies: [policy] })} />)
+    expect(screen.queryByTestId('delete-policy-uuid-99')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('restore-policy-uuid-99')).not.toBeInTheDocument()
+  })
+
+  it('C9: is_ignored=true 时渲染恢复按钮 (蓝, Undo2), 不是删除按钮', () => {
+    const onToggle = vi.fn()
+    const policy = makePolicy({ row_uuid: 'uuid-ignored', is_ignored: true })
+    render(
+      <FirewallPolicyTable
+        group={makeGroup({ policies: [policy] })}
+        onToggleIgnore={onToggle}
+      />
+    )
+    // 恢复按钮存在
+    const restoreBtn = screen.getByTestId('restore-policy-uuid-ignored')
+    expect(restoreBtn).toBeInTheDocument()
+    // 删除按钮不存在
+    expect(screen.queryByTestId('delete-policy-uuid-ignored')).not.toBeInTheDocument()
+    fireEvent.click(restoreBtn)
+    expect(onToggle).toHaveBeenCalledWith('uuid-ignored', true)
+  })
+
+  it('C9: is_ignored=true 时行 className 含 opacity-50 bg-gray-50', () => {
+    const policy = makePolicy({ row_uuid: 'uuid-g', is_ignored: true })
+    const { container } = render(
+      <FirewallPolicyTable group={makeGroup({ policies: [policy] })} />
+    )
+    const tr = container.querySelector('tbody tr')
+    expect(tr).not.toBeNull()
+    expect(tr!.className).toContain('opacity-50')
+    expect(tr!.className).toContain('bg-gray-50')
+  })
+
+  it('C9: is_ignored=false 时行 className 不含 opacity-50', () => {
+    const policy = makePolicy({ row_uuid: 'uuid-n', is_ignored: false })
+    const { container } = render(
+      <FirewallPolicyTable group={makeGroup({ policies: [policy] })} />
+    )
+    const tr = container.querySelector('tbody tr')
+    expect(tr).not.toBeNull()
+    expect(tr!.className).not.toContain('opacity-50')
   })
 })

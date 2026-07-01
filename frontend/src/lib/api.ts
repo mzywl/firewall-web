@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { Order, Policy, PolicyVersion, PushStatus } from '../types';
+import type { Order, Policy, PolicyVersion, PreviewData } from '../types';
 import { toast } from './toast';
 
 // 同源：空 baseURL，nginx 同域名反代 /api
@@ -39,7 +39,7 @@ api.interceptors.response.use(
 // v2 推送相关类型
 // ============================================================
 
-export type PushMode = 'deduplicate' | 'force_push';
+export type PushMode = 'deduplicate' | 'force_push' | 'reuse_objects';
 
 export interface PushV2Result {
   success: boolean;
@@ -175,34 +175,146 @@ export const updatePolicies = async (orderId: number, policies: Policy[]): Promi
   return data;
 };
 
-// 开始推送
-export const startPush = async (orderId: number): Promise<{ message: string; task_id: string; order_id: number; policies_count: number }> => {
-  const { data } = await api.post(`/api/push/orders/${orderId}/start`);
+// 删除单条策略 (C2 后端 DELETE /api/orders/{id}/policies/{pid} 端点, status 204)
+// 用途: preview 页直接删除用户不想要的策略, 同时清理 user_modified 快照
+// (2026-06-28 Execution Plan 重构后, Preview 页不再调用 — 用 PUT /plan/ignore 替代
+//  本函数保留兼容其他场景, 例如 Edit 页直接删物理 Policy)
+export const deletePolicy = async (orderId: number, policyId: number): Promise<void> => {
+  await api.delete(`/api/orders/${orderId}/policies/${policyId}`);
+};
+
+// ============================================================
+// Execution Plan (2026-06-28) — Preview 页专用接口
+// ============================================================
+//
+// 新架构下 Preview 页只是 "渲染器 + 开关触发器":
+//   - GET  /preview           → 拉后端生成好的 plan_data (含 row_uuid + is_ignored)
+//   - PUT  /plan/ignore       → 软删除/恢复单行 (用 row_uuid 寻址)
+//   - POST /commit            → 把快照里的 is_ignored=false 行写入物理 policies 表
+//
+// 前端不再比对原始表格 + 合并结果, 拿到什么渲染什么
+// (老接口 DELETE /policies/{pid} 还保留供 Edit 页使用)
+
+// 切换单行的 is_ignored (软删除/恢复)
+// row_uuid: 后端给每行分配的 UUID, 唯一标识一行预览策略
+// ignore:   true = 软删除 (变灰), false = 恢复 (正常)
+export const togglePlanRowIgnore = async (
+  orderId: number,
+  rowUuid: string,
+  ignore: boolean,
+): Promise<{ message: string; row_uuid: string; is_ignored: boolean }> => {
+  const { data } = await api.put(`/api/workorders/${orderId}/plan/ignore`, {
+    row_uuid: rowUuid,
+    ignore,
+  });
   return data;
 };
 
-// 策略合并分析
-export const mergePolicies = async (orderId: number): Promise<{
-  message: string;
-  original_count: number;
-  merged_count: number;
-  redundant_count: number;
-  redundant_ids: number[];
-  merged_policies: Policy[];
-}> => {
-  const { data } = await api.post(`/api/push/orders/${orderId}/merge`);
-  return data;
-};
-
-// 获取推送状态
-export const getPushStatus = async (orderId: number): Promise<PushStatus> => {
-  const { data } = await api.get<PushStatus>(`/api/push/orders/${orderId}/status`);
+// 提交工单: 把 Execution Plan 快照写入物理 policies 表
+// (后端用 plan_data 里每行的 is_ignored 标记 push_status: true→'ignored', false→'pending')
+// 不需要在 body 传任何数据 — 后端直接从 PolicyVersion.execution_plan 读
+export const commitOrder = async (
+  orderId: number,
+): Promise<{ message: string; inserted_count: number }> => {
+  const { data } = await api.post(`/api/workorders/${orderId}/commit`);
   return data;
 };
 
 // ============================================================
 // v2 推送 + 防火墙 + 快照
 // ============================================================
+
+// (2026-06-28) /api/push/orders/<id>/tasks 原始响应类型 (精简版 — Push 页只用于列墙)
+// 字段集是 user 拍板的最小集: firewall 4 字段 + policies 4 字段 (id + src/dst IP + service)
+// 不含 NAT / zone / 系统名 / 时间 — 那些由 /generate-script 按墙按需补
+export interface PushTaskFirewallRaw {
+  id: number;
+  name: string;
+  type: string;
+  management_ip: string;
+}
+
+export interface PushTaskPolicyRaw {
+  policy_id: number;
+  src_ip: string;
+  dst_ip: string;
+  service: string;
+}
+
+export interface PushTaskRaw {
+  firewall: PushTaskFirewallRaw;
+  policies: PushTaskPolicyRaw[];
+}
+
+export interface PushTasksRawResponse {
+  order_id: number;
+  total_firewalls: number;
+  total_policies: number;
+  tasks: PushTaskRaw[];
+}
+
+/**
+ * Push 页进入时调用 — 列该工单下所有 pending 策略(按防火墙分组)
+ *
+ * 返回 shape 经过适配, 兼容旧 PreviewData 接口 (Push.tsx 大量引用 previewData.firewall_groups)
+ * 适配原则 (2026-06-28 精简):
+ *   - firewall 4 字段直传 + 补 alias/belong_region/is_zone_boundary/auto_push 默认空值
+ *   - policies 字段: src_ip/dst_ip/service 直传 + 补全 PreviewPolicy 必填字段 (action=row, row_uuid=fake, ...)
+ */
+export const getPushTasks = async (orderId: number): Promise<PreviewData> => {
+  const { data } = await api.get<PushTasksRawResponse>(`/api/push/orders/${orderId}/tasks`);
+
+  return {
+    order: {
+      id: data.order_id,
+      // order_no/title/status/created_at 由 Push 页另外通过 useOrder 单独拉
+      order_no: '',
+      title: '',
+      status: '',
+      created_at: '',
+    },
+    firewall_groups: data.tasks.map((task) => ({
+      firewall: {
+        id: task.firewall.id,
+        name: task.firewall.name,
+        alias: '',
+        type: task.firewall.type,
+        management_ip: task.firewall.management_ip,
+        belong_region: '',
+        is_zone_boundary: 0,
+        auto_push: 0,
+      },
+      policies: task.policies.map((p, idx) => ({
+        row_uuid: `task-${p.policy_id}-${idx}`,  // 假 UUID, Push 页不依赖
+        is_ignored: false,
+        id: p.policy_id,
+        sequence: idx + 1,
+        original_policy_id: p.policy_id,
+        source_zone: '',
+        source_ip: p.src_ip,
+        dest_zone: '',
+        dest_ip: p.dst_ip,
+        service: p.service,
+        action: 'permit',
+        nat_info: {
+          need_nat: false,
+          nat_type: null,
+          snat_address: null,
+          dnat_address: null,
+          source_zone: null,
+          dest_zone: null,
+          source_zone_name: '',
+          dest_zone_name: '',
+          warnings: [],
+        },
+        nat_policies: [],
+      })),
+    })),
+    unmatched_policies: [],
+    warnings: [],
+    errors: [],
+  };
+};
 
 // 列出所有防火墙（精简字段）
 export const listFirewalls = async (): Promise<Firewall[]> => {
@@ -263,18 +375,4 @@ export const getSnapshotLogs = async (
   );
   return data;
 };
-
-// 列出某防火墙的历史快照
-export const listFirewallSnapshots = async (
-  firewallId: number,
-  limit = 20,
-  offset = 0,
-): Promise<{ firewall_id: number; firewall_name: string; total: number; snapshots: PushSnapshot[] }> => {
-  const { data } = await api.get(
-    `/api/push/firewall/${firewallId}/snapshots`,
-    { params: { limit, offset } },
-  );
-  return data;
-};
-
 export default api;
